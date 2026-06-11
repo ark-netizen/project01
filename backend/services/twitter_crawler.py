@@ -1,7 +1,13 @@
 import os
 import json
 import asyncio
-import requests as req
+
+try:
+    from curl_cffi import requests as curl_req
+    _USE_CURL = True
+except ImportError:
+    import requests as curl_req  # type: ignore[no-redef]
+    _USE_CURL = False
 
 _auth_token: str = ""
 _ct0: str = ""
@@ -12,7 +18,7 @@ _BEARER = (
     "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 )
 
-# Twitter GraphQL SearchTimeline query IDs (try multiple — changes periodically)
+# GraphQL SearchTimeline query IDs — try multiple in case one is outdated
 _GRAPHQL_QIDS = [
     "nK1dw4oV3k4w5TdtcAdSww",
     "gkjsKepM6gl_HmFWoWKfgg",
@@ -81,7 +87,6 @@ def _parse_graphql(data: dict) -> list[dict] | None:
             continue
 
         for entry in raw_entries:
-            # content lives under "content" (TimelineAddEntries) or "item" (TimelineAddToModule)
             content = entry.get("content") or entry.get("item") or {}
             item_content = content.get("itemContent", {})
 
@@ -92,7 +97,6 @@ def _parse_graphql(data: dict) -> list[dict] | None:
             if not result:
                 continue
 
-            # TweetWithVisibilityResults wraps the actual tweet
             if result.get("__typename") == "TweetWithVisibilityResults":
                 result = result.get("tweet", result)
 
@@ -125,11 +129,6 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         "x-twitter-active-user": "yes",
         "x-twitter-auth-type": "OAuth2Session",
         "x-twitter-client-language": "ko",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
         "Accept": "*/*",
         "Accept-Language": "ko-KR,ko;q=0.9",
         "Referer": "https://x.com/search",
@@ -143,33 +142,40 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         "product": "Latest",
     }, separators=(',', ':'))
 
+    # curl_cffi extra kwargs — ignored if falling back to requests
+    extra = {"impersonate": "chrome120"} if _USE_CURL else {}
+
     errors = []
     for qid in _GRAPHQL_QIDS:
         for base in ("https://x.com", "https://twitter.com"):
             url = f"{base}/i/api/graphql/{qid}/SearchTimeline"
-            tag = f"[{base.split('/')[2]}:{qid[:8]}]"
+            tag = f"[{base.split('/')[2][:5]}:{qid[:8]}]"
             try:
-                r = req.get(
-                    url, headers=headers, cookies=cookies,
+                r = curl_req.get(
+                    url,
+                    headers=headers,
+                    cookies=cookies,
                     params={
                         "variables": variables,
                         "features": _FEATURES,
                         "fieldToggles": _FIELD_TOGGLES,
                     },
                     timeout=15,
+                    **extra,
                 )
-                if r.status_code in (400, 401, 403):
-                    errors.append(f"{tag} 인증오류({r.status_code})")
+                status = r.status_code
+                if status in (401, 403):
+                    errors.append(f"{tag} 인증오류({status})")
                     continue
-                if r.status_code == 429:
+                if status == 429:
                     raise RuntimeError("Twitter 요청 한도 초과: 잠시 후 다시 시도해주세요.")
                 if not r.content or not r.content.strip():
-                    errors.append(f"{tag} 빈응답")
+                    errors.append(f"{tag} 빈응답(status={status})")
                     continue
                 try:
                     data = r.json()
                 except ValueError:
-                    errors.append(f"{tag} JSON오류({r.status_code}): {r.text[:60]}")
+                    errors.append(f"{tag} JSON오류({status}): {r.text[:60]}")
                     continue
 
                 if "errors" in data and data["errors"]:
@@ -180,16 +186,16 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
                 tweets = _parse_graphql(data)
                 if tweets is not None:
                     return tweets
-                # Parsed OK but no tweets — might still be valid (empty results)
                 if "data" in data:
                     return []
                 errors.append(f"{tag} 파싱실패 keys={list(data.keys())[:4]}")
             except RuntimeError:
                 raise
             except Exception as e:
-                errors.append(f"{tag} 예외: {_redact(str(e))[:60]}")
+                errors.append(f"{tag} 예외: {_redact(str(e))[:80]}")
 
-    raise RuntimeError("Twitter 검색 실패: " + " / ".join(errors))
+    curl_info = f"(curl_cffi={'on' if _USE_CURL else 'off'})"
+    raise RuntimeError(f"Twitter 검색 실패 {curl_info}: " + " / ".join(errors))
 
 
 async def search_tweets(keyword: str, count: int = 30) -> list[dict]:
