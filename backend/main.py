@@ -70,22 +70,32 @@ async def debug_ondemand():
         r = curl_req.get("https://x.com/", impersonate="chrome120", timeout=20,
                          headers={"Accept": "text/html,*/*", "Cache-Control": "no-cache"})
         html = r.text or ""
-        m = re.search(r'ondemand\.s\.([\w]+)a\.js', html)
-        if not m:
-            return {"error": "ondemand pattern not found",
-                    "html_len": len(html),
-                    "meta_tag": "<meta name=\"twitter-site-verification\"" in html,
-                    "anim_tag": "loading-x-anim" in html}
-        hash_val = m.group(1)
-        url = f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{hash_val}a.js"
-        jr = curl_req.get(url, impersonate="chrome120", timeout=20)
+
+        # Find all ondemand-related substrings (show context)
+        ondemand_hits = []
+        for m in re.finditer(r'ondemand.{0,80}', html):
+            ondemand_hits.append(m.group())
+        ondemand_hits = ondemand_hits[:10]
+
+        # Try multiple URL patterns
+        url = None
+        for pat in (
+            r'ondemand\.s\.([\w]+)a\.js',
+            r'ondemand\.s\.([\w-]+)\.js',
+            r'"ondemand\.s","([\w]+)"',
+            r'ondemand[._]s[._]([\w]+)',
+        ):
+            m2 = re.search(pat, html)
+            if m2:
+                url = m2.group(0)
+                break
+
         return {
-            "hash": hash_val,
-            "url": url,
-            "js_status": jr.status_code,
-            "js_preview": (jr.text or "")[:3000],
+            "html_len": len(html),
             "meta_tag": "<meta name=\"twitter-site-verification\"" in html,
             "anim_tag": "loading-x-anim" in html,
+            "ondemand_url_found": url,
+            "ondemand_hits": ondemand_hits,
         }
     except Exception as e:
         return {"error": str(e)}
