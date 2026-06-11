@@ -2,12 +2,10 @@ import os
 from twikit import Client
 
 _client: Client | None = None
-
-MAX_COUNT = 50  # 절대 상한
+MAX_COUNT = 50
 
 
 def _redact(msg: str) -> str:
-    """에러 메시지에서 인증 토큰 제거"""
     for key in ("TWITTER_AUTH_TOKEN", "TWITTER_CT0"):
         val = os.getenv(key, "")
         if val and val in msg:
@@ -15,19 +13,39 @@ def _redact(msg: str) -> str:
     return msg
 
 
+def _patch_twikit():
+    """Render 서버 IP에서 Twitter JS 파싱 실패(KEY_BYTE) 우회 패치"""
+    async def _no_txn(self, *args, **kwargs):
+        return ""
+
+    # ClientTransaction.get_transaction_id 패치
+    try:
+        import twikit.client_transaction as ct
+        ct.ClientTransaction.get_transaction_id = _no_txn
+    except Exception:
+        pass
+
+    # Client._get_client_transaction_id 패치 (버전에 따라 위치 다름)
+    try:
+        from twikit.client.client import Client as TC
+        TC._get_client_transaction_id = _no_txn
+    except Exception:
+        pass
+
+
 async def initialize() -> None:
-    """서버 시작 시 Render 환경변수로 자동 초기화"""
     global _client
     auth_token = os.getenv("TWITTER_AUTH_TOKEN", "").strip()
     ct0 = os.getenv("TWITTER_CT0", "").strip()
     if not auth_token or not ct0:
-        return  # 환경변수 미설정 시 조용히 비활성화
+        return
     try:
+        _patch_twikit()
         client = Client(language="ko-KR")
         client.set_cookies({"auth_token": auth_token, "ct0": ct0})
         _client = client
     except Exception:
-        pass  # 초기화 실패도 로그에 남기지 않음
+        pass
 
 
 def is_ready() -> bool:
