@@ -1,6 +1,10 @@
 import os
 import re
 import json
+import math
+import time
+import random
+import hashlib
 import uuid
 import base64
 import secrets
@@ -8,6 +12,8 @@ import asyncio
 import threading
 import importlib
 import pkgutil
+from functools import reduce
+from typing import List, Union
 
 try:
     from curl_cffi import requests as curl_req
@@ -53,12 +59,14 @@ _FEATURES = json.dumps({
 }, separators=(',', ':'))
 _FIELD_TOGGLES = json.dumps({"withArticleRichContentState": False}, separators=(',', ':'))
 
+# x-client-transaction-id 알고리즘 상수 (twikit 2.3.3에서 확인)
+_CT_KEYWORD = "obfiowerehiring"
+_CT_EXTRA = 3
+
 _live_qid: str | None = None
 _guest_token: str | None = None
-_ct_obj = None
-_CTClass = None
+_ct_state: dict = {}   # {key, key_bytes, soup, row_idx, key_indices}
 _ct_info: str = "not_init"
-_twikit_diag: str = "not_init"
 _qid_lock = threading.Lock()
 _CLIENT_UUID = str(uuid.uuid4())
 
@@ -68,49 +76,6 @@ def _redact(msg: str) -> str:
         if val and val in msg:
             msg = msg.replace(val, "[REDACTED]")
     return msg
-
-
-# ─── twikit discovery (pkgutil full scan) ────────────────────────
-
-def _discover_twikit() -> None:
-    global _CTClass, _twikit_diag
-    try:
-        import twikit as _tw
-        ver = getattr(_tw, "__version__", "?")
-        _twikit_diag = f"v{ver}"
-
-        # Check __init__ exports first
-        ct = getattr(_tw, "ClientTransaction", None)
-        if ct:
-            _CTClass = ct
-            _twikit_diag += ",CT@__init__"
-            return
-
-        # Walk every submodule
-        found_at = None
-        for _, modname, _ in pkgutil.walk_packages(
-            path=_tw.__path__, prefix="twikit.", onerror=lambda _: None
-        ):
-            try:
-                mod = importlib.import_module(modname)
-                ct = getattr(mod, "ClientTransaction", None)
-                if ct:
-                    _CTClass = ct
-                    found_at = modname
-                    break
-            except Exception:
-                pass
-
-        if found_at:
-            _twikit_diag += f",CT@{found_at}"
-        else:
-            top = [a for a in dir(_tw) if not a.startswith("_")][:8]
-            _twikit_diag += f",CT_not_found,top={top}"
-
-    except ImportError as e:
-        _twikit_diag = f"not_installed:{str(e)[:40]}"
-    except Exception as e:
-        _twikit_diag = f"err:{str(e)[:50]}"
 
 
 # ─── guest token ─────────────────────────────────────────────────
@@ -132,46 +97,221 @@ def _activate_guest_token() -> str | None:
     return None
 
 
-# ─── ClientTransaction ────────────────────────────────────────────
+# ─── x-client-transaction-id (native implementation) ─────────────
 
-class _FakeResp:
-    def __init__(self, text: str):
-        self.text = text
+class _Cubic:
+    """Cubic bezier helper (port of twikit's Cubic class)."""
+    def __init__(self, curves: list):
+        self.curves = curves
+
+    def get_value(self, t: float) -> float:
+        start = 0.0
+        for i, curve in enumerate(self.curves):
+            if i == len(self.curves) - 1 or curve >= t:
+                if i == 0:
+                    return 0.0
+                p0 = self.curves[i - 1]
+                p1 = curve
+                seg = (t - p0) / (p1 - p0) if p1 != p0 else 0.0
+                return seg
+        return 1.0
+
+
+def _interpolate(a: list, b: list, t: float) -> list:
+    return [a[i] + (b[i] - a[i]) * t for i in range(len(a))]
+
+
+def _convert_rotation_to_matrix(deg: float) -> list:
+    rad = math.radians(deg)
+    c, s = math.cos(rad), math.sin(rad)
+    return [c, -s, s, c]
+
+
+def _float_to_hex(f: float) -> str:
+    if f == 0:
+        return "0"
+    s = f"{f:.10f}".rstrip("0").rstrip(".")
+    if "." in s:
+        int_part, dec_part = s.split(".")
+        return f"{int_part}.{dec_part}" if int_part else f".{dec_part}"
+    return s
+
+
+def _is_odd(n: int) -> int:
+    return n % 2
+
+
+def _solve(value: float, min_val: float, max_val: float, rounding: bool) -> float:
+    result = value * (max_val - min_val) / 255 + min_val
+    return math.floor(result) if rounding else round(result, 2)
+
+
+def _animate(frames: list, target_time: float) -> str:
+    from_color = [float(x) for x in [*frames[:3], 1]]
+    to_color   = [float(x) for x in [*frames[3:6], 1]]
+    from_rot   = [0.0]
+    to_rot     = [_solve(float(frames[6]), 60.0, 360.0, True)]
+    rem = frames[7:]
+    curves = [_solve(float(v), _is_odd(i), 1.0, False) for i, v in enumerate(rem)]
+    cubic = _Cubic(curves)
+    val = cubic.get_value(target_time)
+    color = [max(v, 0) for v in _interpolate(from_color, to_color, val)]
+    rotation = _interpolate(from_rot, to_rot, val)
+    matrix = _convert_rotation_to_matrix(rotation[0])
+    arr = [format(round(v), 'x') for v in color[:-1]]
+    for v in matrix:
+        rv = abs(round(v, 2))
+        hx = _float_to_hex(rv)
+        arr.append(f"0{hx}".lower() if hx.startswith(".") else hx if hx else "0")
+    arr.extend(["0", "0"])
+    return re.sub(r"[.-]", "", "".join(arr))
+
+
+def _get_key_byte_indices(html: str) -> tuple[int, list]:
+    """Try to get row_index & key_indices from ondemand.s JS; fallback to known values."""
+    if not _USE_CURL:
+        return 2, [12, 14, 7]
+
+    # 1. Search HTML for ondemand.s hash
+    hash_val = None
+    for pat in (
+        r'"ondemand\.s"\s*:\s*"([a-f0-9]+)"',
+        r'ondemand\.s\.([\w]+?)a?\.js',
+        r'["\']([\w]{7,10})["\']\s*:\s*"ondemand\.s"',
+    ):
+        m = re.search(pat, html)
+        if m:
+            hash_val = m.group(1)
+            break
+
+    # 2. If not in HTML, search main JS bundle
+    if not hash_val:
+        bundle_urls = list(dict.fromkeys(re.findall(
+            r'https://abs\.twimg\.com/responsive-web/client-web/main\.[^\s"\'<>]+\.js', html
+        )))
+        for u in bundle_urls[:2]:
+            try:
+                jr = curl_req.get(u, impersonate="chrome120", timeout=15)
+                txt = jr.text or ""
+                for pat in (
+                    r'"ondemand\.s"\s*:\s*"([a-f0-9]+)"',
+                    r'ondemand\.s\.([\w]+?)a?\.js',
+                ):
+                    m = re.search(pat, txt)
+                    if m:
+                        hash_val = m.group(1)
+                        break
+            except Exception:
+                pass
+            if hash_val:
+                break
+
+    # 3. If hash found, fetch the ondemand.s JS and parse indices
+    if hash_val:
+        for url in (
+            f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{hash_val}a.js",
+            f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{hash_val}.js",
+        ):
+            try:
+                jr = curl_req.get(url, impersonate="chrome120", timeout=15)
+                if jr.status_code == 200 and jr.text:
+                    nums = [int(x) for x in re.findall(r'\b(\d{1,3})\b', jr.text)
+                            if 0 <= int(x) <= 255]
+                    if len(nums) >= 4:
+                        return nums[0], nums[1:4]
+            except Exception:
+                pass
+
+    # 4. Fallback: last known values from twikit source comments
+    return 2, [12, 14, 7]
+
+
+def _generate_transaction_id(method: str, path: str, soup, key_bytes: list,
+                              row_idx: int, key_indices: list) -> str:
+    total_time = 4096
+    frames_list = soup.select("[id^='loading-x-anim']")
+    frame = list(list(frames_list[key_bytes[5] % 4].children)[0].children)[1]
+    raw_d = frame.get("d", "")[9:]
+    arr2d = [[int(x) for x in re.sub(r"[^\d]+", " ", seg).strip().split()]
+             for seg in raw_d.split("C")]
+
+    row_index = key_bytes[row_idx] % 16
+    frame_time = reduce(lambda a, b: a * b,
+                        [key_bytes[idx] % 16 for idx in key_indices])
+    frame_row = arr2d[row_index]
+    target_time = float(frame_time) / total_time
+    animation_key = _animate(frame_row, target_time)
+
+    t_now = math.floor((time.time() * 1000 - 1682924400 * 1000) / 1000)
+    t_bytes = [(t_now >> (i * 8)) & 0xFF for i in range(4)]
+    h = hashlib.sha256(
+        f"{method}!{path}!{t_now}{_CT_KEYWORD}{animation_key}".encode()
+    ).digest()
+    rand = random.randint(0, 255)
+    payload = [*key_bytes, *t_bytes, *list(h)[:16], _CT_EXTRA]
+    out = bytearray([rand, *[b ^ rand for b in payload]])
+    return base64.b64encode(bytes(out)).decode().rstrip("=")
 
 
 def _init_ct() -> None:
-    global _ct_obj, _ct_info
-    if not (_CTClass and _USE_CURL):
-        _ct_info = f"no_CT({_twikit_diag},curl={_USE_CURL})"
+    global _ct_state, _ct_info
+    if not _USE_CURL:
+        _ct_info = "no_curl"
         return
-    # twikit 2.3.x: ClientTransaction() takes no args (fetches homepage internally)
-    # twikit 2.0-2.2.x: ClientTransaction(response) takes a response object
-    for attempt in ("noarg", "resp"):
-        try:
-            if attempt == "noarg":
-                ct = _CTClass()
-            else:
-                r = curl_req.get(
-                    "https://x.com/",
-                    headers={"Accept": "text/html,*/*",
-                             "Accept-Language": "en-US,en;q=0.9",
-                             "Cache-Control": "no-cache"},
-                    impersonate="chrome120", timeout=20,
-                )
-                ct = _CTClass(_FakeResp(r.text))
-            # Verify it can generate an ID
-            ct.generate_transaction_id("GET", "/i/api/graphql/test/SearchTimeline")
-            _ct_obj = ct
-            _ct_info = f"CT_OK_{attempt}"
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        _ct_info = "no_bs4"
+        return
+    try:
+        r = curl_req.get(
+            "https://x.com/",
+            headers={"Accept": "text/html,*/*", "Accept-Language": "en-US,en;q=0.9",
+                     "Cache-Control": "no-cache"},
+            impersonate="chrome120", timeout=20,
+        )
+        html = r.text or ""
+        soup = BeautifulSoup(html, "html.parser")
+
+        meta = soup.select_one("[name='twitter-site-verification']")
+        if not meta:
+            _ct_info = "CT_err:no_meta_tag"
             return
-        except Exception as e:
-            _ct_info = f"CT_err_{attempt}:{str(e)[:50]}"
+        key = meta.get("content", "")
+        key_bytes = list(base64.b64decode(key.encode()))
+
+        frames = soup.select("[id^='loading-x-anim']")
+        if len(frames) < 4:
+            _ct_info = f"CT_err:frames={len(frames)}"
+            return
+
+        row_idx, key_indices = _get_key_byte_indices(html)
+
+        # Verify the algorithm runs without error
+        _generate_transaction_id("GET", "/i/api/graphql/test/SearchTimeline",
+                                  soup, key_bytes, row_idx, key_indices)
+
+        _ct_state = {
+            "soup": soup,
+            "key_bytes": key_bytes,
+            "row_idx": row_idx,
+            "key_indices": key_indices,
+        }
+        _ct_info = f"CT_OK(idx={row_idx},{key_indices})"
+    except Exception as e:
+        _ct_info = f"CT_err:{str(e)[:80]}"
 
 
 def _txn_id(method: str, path: str) -> str:
-    if _ct_obj is not None:
+    if _ct_state:
         try:
-            return _ct_obj.generate_transaction_id(method, path)
+            return _generate_transaction_id(
+                method, path,
+                _ct_state["soup"],
+                _ct_state["key_bytes"],
+                _ct_state["row_idx"],
+                _ct_state["key_indices"],
+            )
         except Exception:
             pass
     return base64.b64encode(secrets.token_bytes(30)).decode().rstrip("=")
@@ -231,60 +371,6 @@ def _fetch_qid() -> tuple[str | None, str]:
     return None, "; ".join(debug)
 
 
-# ─── twikit.Client high-level search (primary) ───────────────────
-
-async def _search_via_twikit_client(keyword: str, count: int) -> list[dict] | None:
-    """
-    Use twikit.Client high-level API.
-    twikit handles x-client-transaction-id internally (using curl_cffi).
-    """
-    global _twikit_diag
-    try:
-        import twikit
-        client = twikit.Client("en-US")
-
-        # Inject auth cookies — try multiple methods
-        cookies_set = False
-        if hasattr(client, "set_cookies"):
-            client.set_cookies({"auth_token": _auth_token, "ct0": _ct0})
-            cookies_set = True
-        elif hasattr(client, "http") and hasattr(client.http, "cookies"):
-            client.http.cookies.update({"auth_token": _auth_token, "ct0": _ct0})
-            cookies_set = True
-        elif hasattr(client, "_session") and hasattr(client._session, "cookies"):
-            client._session.cookies.update({"auth_token": _auth_token, "ct0": _ct0})
-            cookies_set = True
-
-        if not cookies_set:
-            _twikit_diag += ",no_cookie_method"
-            return None
-
-        results = await client.search_tweet(keyword, "Latest", count=count)
-        tweets: list[dict] = []
-        for tweet in results:
-            try:
-                tweets.append({
-                    "id": str(tweet.id),
-                    "text": tweet.text or "",
-                    "user": tweet.user.screen_name if tweet.user else "unknown",
-                    "created_at": str(tweet.created_at or ""),
-                    "likes": tweet.favorite_count or 0,
-                    "retweets": tweet.retweet_count or 0,
-                })
-            except Exception:
-                pass
-        _twikit_diag += f",found={len(tweets)}"
-        return tweets
-
-    except ImportError:
-        _twikit_diag = "not_installed"
-        return None
-    except Exception as e:
-        err = _redact(str(e))[:80]
-        _twikit_diag += f",tw_err:{err}"
-        return None
-
-
 # ─── initialize & warm ───────────────────────────────────────────
 
 async def initialize() -> None:
@@ -299,7 +385,6 @@ async def initialize() -> None:
 
 def _warm() -> None:
     global _live_qid, _guest_token
-    _discover_twikit()
     _init_ct()
     gt = _activate_guest_token()
     if gt:
@@ -319,9 +404,8 @@ def is_ready() -> bool:
 def debug_info() -> dict:
     return {
         "curl_cffi": _USE_CURL,
-        "twikit_diag": _twikit_diag,
         "ct_info": _ct_info,
-        "ct_class_found": _CTClass is not None,
+        "ct_ok": bool(_ct_state),
         "guest_token_ok": bool(_guest_token),
         "live_qid": (_live_qid[:12] + "...") if _live_qid else None,
     }
@@ -373,7 +457,7 @@ def _parse_graphql(data: dict) -> list[dict] | None:
     return tweets if tweets else None
 
 
-# ─── manual GraphQL fallback ──────────────────────────────────────
+# ─── manual GraphQL search ────────────────────────────────────────
 
 _BASES = [
     "https://x.com/i/api/graphql",
@@ -418,7 +502,7 @@ def _try(qid: str, base: str, headers: dict, cookies: dict,
         return f"[{short}] 예외: {_redact(str(e))[:80]}"
 
 
-def _search_manual(keyword: str, count: int) -> list[dict]:
+def _search_sync(keyword: str, count: int) -> list[dict]:
     global _live_qid, _guest_token
 
     qids: list[str] = []
@@ -485,9 +569,8 @@ def _search_manual(keyword: str, count: int) -> list[dict]:
             errors.append(f"[same_qid:{dbg}]")
 
     raise RuntimeError(
-        f"Twitter 검색 실패 (curl={'on' if _USE_CURL else 'off'},"
-        f"CT={_ct_info},gt={'on' if _guest_token else 'off'},"
-        f"twikit={_twikit_diag}): " + " / ".join(errors)
+        f"Twitter 검색 실패 (CT={_ct_info},gt={'on' if _guest_token else 'off'}): "
+        + " / ".join(errors)
     )
 
 
@@ -497,16 +580,9 @@ async def search_tweets(keyword: str, count: int = 30) -> list[dict]:
     if not is_ready():
         raise RuntimeError("Twitter 서비스가 설정되지 않았습니다.")
     count = min(count, MAX_COUNT)
-
-    # Primary: twikit.Client (handles transaction ID internally)
-    result = await _search_via_twikit_client(keyword, count)
-    if result is not None:
-        return result
-
-    # Fallback: manual GraphQL
     loop = asyncio.get_event_loop()
     try:
-        return await loop.run_in_executor(None, lambda: _search_manual(keyword, count))
+        return await loop.run_in_executor(None, lambda: _search_sync(keyword, count))
     except RuntimeError:
         raise
     except Exception as e:

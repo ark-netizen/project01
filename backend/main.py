@@ -33,7 +33,6 @@ def translate_text(body: dict):
     text = str(body.get("text", ""))[:500]
     if not text:
         return {"translated": ""}
-    # 간단한 언어 감지
     if re.search(r'[぀-ゟ゠-ヿ]', text):
         langpair = "ja|ko"
     elif re.search(r'[一-鿿]', text):
@@ -53,62 +52,6 @@ def translate_text(body: dict):
         return {"translated": text, "error": "번역 실패"}
 
 
-@app.get("/api/debug/twitter")
-def debug_twitter():
-    from services.twitter_crawler import debug_info
-    return debug_info()
-
-
-@app.get("/api/debug/ct-consts")
-def debug_ct_consts():
-    import importlib
-    try:
-        mod = importlib.import_module("twikit.guest.client")
-        CT = mod.ClientTransaction
-        return {k: repr(v) for k, v in vars(CT).items()
-                if not k.startswith("__") and not callable(v)}
-    except Exception as e:
-        return {"error": str(e)}
-
-
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "ok"}
-
-
-@app.get("/api/debug/sentiment")
-def debug_sentiment():
-    """감성 모델 동작 확인용 테스트 엔드포인트"""
-    import os
-    from services.sentiment import analyze_batch, HF_API_URL
-    from services.keywords import extract_keywords
-
-    samples = [
-        "이 영상 정말 재미있고 유익했어요! 최고입니다",
-        "별로예요. 완전 실망했어요",
-        "그냥 그저 그런 영상이네요",
-        "대박! 진짜 너무 좋다",
-        "This is amazing, loved every second",
-    ]
-
-    try:
-        results = analyze_batch(samples)
-        kw = extract_keywords(samples)
-    except Exception as e:
-        return {
-            "status": "error",
-            "model": HF_API_URL,
-            "hf_token_set": bool(os.getenv("HF_TOKEN")),
-            "error": str(e),
-        }
-
-    return {
-        "status": "ok",
-        "model": HF_API_URL,
-        "hf_token_set": bool(os.getenv("HF_TOKEN")),
-        "results": [
-            {"text": s, "label": r.get("label"), "label_ko": r.get("label_ko"), "score": r.get("score"), "error": r.get("error")}
-            for s, r in zip(samples, results)
-        ],
-        "keywords": kw,
-    }
