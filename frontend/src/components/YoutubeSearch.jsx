@@ -6,12 +6,11 @@ import KeywordChart from './KeywordChart'
 import ItemList from './ItemList'
 
 const STEP_LABELS = {
-  search: '영상 검색 중...',
-  found:  '영상 발견됨',
-  crawl:  '댓글 수집 중...',
-  analyze:'감성 분석 중...',
-  keywords:'키워드 추출 중...',
-  done:   '완료',
+  search:   '영상 검색 중...',
+  found:    '영상 발견됨',
+  crawl:    '댓글 수집 중...',
+  analyze:  '감성 분석 중...',
+  keywords: '키워드 추출 중...',
 }
 
 export default function YoutubeSearch() {
@@ -25,25 +24,34 @@ export default function YoutubeSearch() {
   const [until, setUntil] = useState('')
 
   const [loading, setLoading] = useState(false)
-  const [progress, setProgress] = useState(null) // { step, msg, current, total }
+  const [progress, setProgress] = useState(null)
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
-  const esRef = useRef(null)
+  const pollRef = useRef(null)
+
+  function stopPoll() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }
 
   function handleStop() {
-    esRef.current?.close()
+    stopPoll()
     setLoading(false)
+    setProgress(null)
   }
 
   async function handleAnalyze(e) {
     e.preventDefault()
+    stopPoll()
     setLoading(true)
     setError('')
     setResult(null)
     setProgress(null)
 
     if (mode === 'keyword') {
-      // SSE 스트리밍
+      // 1단계: 작업 시작
       const params = new URLSearchParams({
         keyword,
         max_videos: maxVideos,
@@ -51,34 +59,53 @@ export default function YoutubeSearch() {
         ...(since && { since }),
         ...(until && { until }),
       })
-      const es = new EventSource(`${api('')}/api/youtube/stream?${params}`)
-      esRef.current = es
+      try {
+        const res = await fetch(api(`/api/youtube/analyze-keyword?${params}`), { method: 'POST' })
+        if (!res.ok) {
+          const d = await res.json()
+          throw new Error(d.detail || '분석 시작 실패')
+        }
+        const { job_id } = await res.json()
 
-      es.onmessage = (e) => {
-        const data = JSON.parse(e.data)
-        if (data.step === 'ping') return
-        if (data.step === 'error') {
-          setError(data.msg)
-          setLoading(false)
-          es.close()
-          return
-        }
-        if (data.step === 'done') {
-          const r = data.result
-          if (r.sentiment_error) setError(`감성분석 오류: ${r.sentiment_error}`)
-          setResult(r)
-          setLoading(false)
-          setProgress(null)
-          es.close()
-          return
-        }
-        setProgress(data)
-      }
-      es.onerror = () => {
-        setError('연결이 끊겼습니다. 다시 시도해주세요.')
+        // 2단계: 2초마다 상태 폴링
+        pollRef.current = setInterval(async () => {
+          try {
+            const jobRes = await fetch(api(`/api/youtube/job/${job_id}`))
+            if (!jobRes.ok) {
+              setError('작업 상태 조회 실패')
+              stopPoll()
+              setLoading(false)
+              return
+            }
+            const job = await jobRes.json()
+
+            setProgress({ step: job.step, msg: job.msg, current: job.current, total: job.total })
+
+            if (job.status === 'done') {
+              const r = job.result
+              if (r?.sentiment_error) setError(`감성분석 오류: ${r.sentiment_error}`)
+              setResult(r)
+              stopPoll()
+              setLoading(false)
+              setProgress(null)
+            } else if (job.status === 'error') {
+              setError(job.error || '알 수 없는 오류')
+              stopPoll()
+              setLoading(false)
+              setProgress(null)
+            }
+          } catch {
+            setError('서버 연결 오류. 잠시 후 다시 시도해주세요.')
+            stopPoll()
+            setLoading(false)
+          }
+        }, 2000)
+
+      } catch (err) {
+        setError(err.message)
         setLoading(false)
-        es.close()
       }
+
     } else {
       // URL 모드: 일반 POST
       try {
@@ -177,23 +204,24 @@ export default function YoutubeSearch() {
 
       {error && <div className="bg-red-50 border border-red-200 text-red-600 rounded-xl px-5 py-4 text-sm">{error}</div>}
 
-      {/* 진행 상황 */}
-      {loading && progress && (
+      {loading && (
         <div className="bg-white rounded-2xl shadow p-6">
           <div className="flex items-center gap-3 mb-4">
             <svg className="animate-spin h-5 w-5 text-red-500" fill="none" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
             </svg>
-            <span className="text-sm font-medium text-gray-700">{progress.msg || STEP_LABELS[progress.step] || '처리 중...'}</span>
+            <span className="text-sm font-medium text-gray-700">
+              {progress?.msg || STEP_LABELS[progress?.step] || '분석 시작 중...'}
+            </span>
           </div>
 
           {/* 단계별 진행 바 */}
           <div className="flex gap-1 mb-3">
-            {['search','crawl','analyze','keywords'].map((s, i) => {
-              const stepOrder = ['search','found','crawl','analyze','keywords','done']
-              const current = stepOrder.indexOf(progress.step)
-              const me = stepOrder.indexOf(s)
+            {['search', 'crawl', 'analyze', 'keywords'].map((s) => {
+              const order = ['search', 'found', 'crawl', 'analyze', 'keywords']
+              const current = order.indexOf(progress?.step ?? '')
+              const me = order.indexOf(s)
               return (
                 <div key={s} className={`h-1.5 flex-1 rounded-full transition-all
                   ${current > me ? 'bg-red-500' : current === me ? 'bg-red-300 animate-pulse' : 'bg-gray-200'}`} />
@@ -202,7 +230,7 @@ export default function YoutubeSearch() {
           </div>
 
           {/* 댓글 수집 진행률 */}
-          {progress.step === 'crawl' && progress.total && (
+          {progress?.step === 'crawl' && progress.total > 0 && (
             <div className="mt-2">
               <div className="flex justify-between text-xs text-gray-400 mb-1">
                 <span>{progress.current}/{progress.total} 영상</span>
@@ -216,16 +244,6 @@ export default function YoutubeSearch() {
               </div>
             </div>
           )}
-        </div>
-      )}
-
-      {loading && !progress && (
-        <div className="flex items-center justify-center gap-3 py-12 text-gray-400 text-sm">
-          <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-          </svg>
-          분석 시작 중...
         </div>
       )}
 
@@ -247,7 +265,7 @@ export default function YoutubeSearch() {
           )}
           <SentimentChart summary={result.summary} />
           <KeywordChart keywords={result.keywords} />
-          <TopAccounts accounts={result.summary.top_accounts} type="youtube" />
+          <TopAccounts accounts={result.summary?.top_accounts} type="youtube" />
           <ItemList items={result.items} type="youtube" />
         </>
       )}
