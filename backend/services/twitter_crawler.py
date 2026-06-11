@@ -69,7 +69,11 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         raise RuntimeError("Twitter 요청 한도 초과: 잠시 후 다시 시도해주세요.")
     r.raise_for_status()
 
-    data = r.json()
+    try:
+        data = r.json()
+    except ValueError:
+        preview = r.text[:300].replace("\n", " ") if r.text else "(empty)"
+        raise RuntimeError(f"Twitter 응답 파싱 실패 (status={r.status_code}): {preview}")
     tweet_objs = data.get("globalObjects", {}).get("tweets", {})
     user_objs = data.get("globalObjects", {}).get("users", {})
 
