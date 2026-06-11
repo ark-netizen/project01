@@ -59,12 +59,34 @@ def debug_twitter():
     return debug_info()
 
 
-@app.get("/api/debug/twikit-ct-source")
-def debug_twikit_ct_source():
-    import inspect, importlib
+@app.get("/api/debug/ondemand-check")
+async def debug_ondemand():
+    import re
     try:
-        mod = importlib.import_module("twikit.guest.client")
-        return {"source": inspect.getsource(mod)}
+        from curl_cffi import requests as curl_req
+    except ImportError:
+        return {"error": "no curl_cffi"}
+    try:
+        r = curl_req.get("https://x.com/", impersonate="chrome120", timeout=20,
+                         headers={"Accept": "text/html,*/*", "Cache-Control": "no-cache"})
+        html = r.text or ""
+        m = re.search(r'ondemand\.s\.([\w]+)a\.js', html)
+        if not m:
+            return {"error": "ondemand pattern not found",
+                    "html_len": len(html),
+                    "meta_tag": "<meta name=\"twitter-site-verification\"" in html,
+                    "anim_tag": "loading-x-anim" in html}
+        hash_val = m.group(1)
+        url = f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{hash_val}a.js"
+        jr = curl_req.get(url, impersonate="chrome120", timeout=20)
+        return {
+            "hash": hash_val,
+            "url": url,
+            "js_status": jr.status_code,
+            "js_preview": (jr.text or "")[:3000],
+            "meta_tag": "<meta name=\"twitter-site-verification\"" in html,
+            "anim_tag": "loading-x-anim" in html,
+        }
     except Exception as e:
         return {"error": str(e)}
 
