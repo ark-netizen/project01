@@ -1,18 +1,16 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { api } from '../api'
 import SentimentChart from './SentimentChart'
 import TopAccounts from './TopAccounts'
 import KeywordChart from './KeywordChart'
 import ItemList from './ItemList'
 
-export default function TwitterSearch() {
-  const [loggedIn, setLoggedIn] = useState(false)
-  const [loginForm, setLoginForm] = useState({ username: '', email: '', password: '' })
-  const [loginLoading, setLoginLoading] = useState(false)
-  const [loginError, setLoginError] = useState('')
+const COOLDOWN_SEC = 10
 
+export default function TwitterSearch() {
+  const [ready, setReady] = useState(null) // null=확인중, true=준비됨, false=미설정
   const [keyword, setKeyword] = useState('')
-  const [count, setCount] = useState(50)
+  const [count, setCount] = useState(30)
   const [since, setSince] = useState('')
   const [until, setUntil] = useState('')
   const [loading, setLoading] = useState(false)
@@ -21,48 +19,39 @@ export default function TwitterSearch() {
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
   const [selectedKeyword, setSelectedKeyword] = useState(null)
+  const [cooldown, setCooldown] = useState(0)
+  const cooldownRef = useRef(null)
   const today = new Date().toISOString().split('T')[0]
 
   useEffect(() => {
     fetch(api('/api/twitter/status'))
       .then(r => r.json())
-      .then(d => setLoggedIn(d.logged_in))
-      .catch(() => {})
+      .then(d => setReady(d.ready))
+      .catch(() => setReady(false))
   }, [])
 
-  async function handleLogin(e) {
-    e.preventDefault()
-    setLoginLoading(true)
-    setLoginError('')
-    try {
-      const res = await fetch(api('/api/twitter/login'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(loginForm),
+  function startCooldown() {
+    setCooldown(COOLDOWN_SEC)
+    cooldownRef.current = setInterval(() => {
+      setCooldown(prev => {
+        if (prev <= 1) {
+          clearInterval(cooldownRef.current)
+          return 0
+        }
+        return prev - 1
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.detail || '로그인 실패')
-      setLoggedIn(true)
-      setLoginForm({ username: '', email: '', password: '' })
-    } catch (err) {
-      setLoginError(err.message)
-    } finally {
-      setLoginLoading(false)
-    }
+    }, 1000)
   }
 
-  async function handleLogout() {
-    await fetch(api('/api/twitter/logout'), { method: 'POST' })
-    setLoggedIn(false)
-    setResult(null)
-  }
+  useEffect(() => () => clearInterval(cooldownRef.current), [])
 
   async function handleSearch(e) {
     e.preventDefault()
-    if (!keyword.trim()) return
+    if (!keyword.trim() || loading || cooldown > 0) return
     setLoading(true)
     setError('')
     setResult(null)
+    setSelectedKeyword(null)
 
     const steps = ['트윗 수집 중...', '감성 분석 중...', '키워드 추출 중...']
     let idx = 0
@@ -85,6 +74,7 @@ export default function TwitterSearch() {
       if (!res.ok) throw new Error(data.detail || '오류 발생')
       if (data.sentiment_error) setError(`감성분석 오류: ${data.sentiment_error}`)
       setResult(data)
+      startCooldown()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -93,60 +83,38 @@ export default function TwitterSearch() {
     }
   }
 
-  if (!loggedIn) {
+  if (ready === null) {
     return (
-      <div className="bg-white rounded-2xl shadow p-8 max-w-md mx-auto">
-        <h2 className="text-xl font-bold text-gray-800 mb-1">Twitter 로그인</h2>
-        <p className="text-sm text-gray-400 mb-6">
-          입력한 정보는 서버 메모리에만 유지되며 저장되지 않습니다.
-        </p>
-        <form onSubmit={handleLogin} className="flex flex-col gap-4">
-          <input
-            type="text"
-            placeholder="Twitter 사용자명 (@없이)"
-            value={loginForm.username}
-            onChange={e => setLoginForm(f => ({ ...f, username: e.target.value }))}
-            className="border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-            required
-          />
-          <input
-            type="email"
-            placeholder="이메일"
-            value={loginForm.email}
-            onChange={e => setLoginForm(f => ({ ...f, email: e.target.value }))}
-            className="border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-            required
-          />
-          <input
-            type="password"
-            placeholder="비밀번호"
-            value={loginForm.password}
-            onChange={e => setLoginForm(f => ({ ...f, password: e.target.value }))}
-            className="border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-            required
-          />
-          {loginError && <p className="text-red-500 text-sm">{loginError}</p>}
-          <button
-            type="submit"
-            disabled={loginLoading}
-            className="bg-blue-500 hover:bg-blue-600 disabled:opacity-50 text-white font-semibold py-3 rounded-xl transition text-sm"
-          >
-            {loginLoading ? '로그인 중...' : '로그인'}
-          </button>
-        </form>
+      <div className="bg-white rounded-2xl shadow p-8 flex items-center justify-center text-gray-400 text-sm gap-3">
+        <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+        </svg>
+        Twitter 서비스 확인 중...
       </div>
     )
   }
 
+  if (ready === false) {
+    return (
+      <div className="bg-white rounded-2xl shadow p-8 max-w-md mx-auto text-center">
+        <div className="text-4xl mb-4">🔧</div>
+        <h2 className="text-lg font-bold text-gray-700 mb-2">Twitter 서비스 준비 중</h2>
+        <p className="text-sm text-gray-400">
+          서버에 Twitter 인증 정보가 설정되지 않았습니다.<br />
+          Render 환경변수에 <code className="bg-gray-100 px-1 rounded">TWITTER_AUTH_TOKEN</code>과{' '}
+          <code className="bg-gray-100 px-1 rounded">TWITTER_CT0</code>를 등록해주세요.
+        </p>
+      </div>
+    )
+  }
+
+  const canSearch = !loading && cooldown === 0 && keyword.trim().length > 0
+
   return (
     <div className="flex flex-col gap-6">
       <form onSubmit={handleSearch} className="bg-white rounded-2xl shadow p-6 flex flex-col gap-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-xl font-bold text-gray-800">Twitter 키워드 감성분석</h2>
-          <button type="button" onClick={handleLogout} className="text-xs text-gray-400 hover:text-gray-600 underline">
-            로그아웃
-          </button>
-        </div>
+        <h2 className="text-xl font-bold text-gray-800">Twitter 키워드 감성분석</h2>
 
         <div className="flex gap-3">
           <input
@@ -164,11 +132,9 @@ export default function TwitterSearch() {
             <option value={10}>10건</option>
             <option value={30}>30건</option>
             <option value={50}>50건</option>
-            <option value={100}>100건</option>
           </select>
         </div>
 
-        {/* 날짜 범위 */}
         <div className="flex gap-3 items-center">
           <span className="text-sm text-gray-500 shrink-0">기간</span>
           <input
@@ -194,12 +160,16 @@ export default function TwitterSearch() {
           )}
           <button
             type="submit"
-            disabled={loading}
-            className="ml-auto bg-blue-500 hover:bg-blue-600 disabled:opacity-50 text-white font-semibold px-6 py-2.5 rounded-xl transition text-sm"
+            disabled={!canSearch}
+            className="ml-auto bg-blue-500 hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold px-6 py-2.5 rounded-xl transition text-sm min-w-[90px]"
           >
-            {loading ? '분석 중...' : '분석'}
+            {loading ? '분석 중...' : cooldown > 0 ? `${cooldown}초 대기` : '분석'}
           </button>
         </div>
+
+        {cooldown > 0 && !loading && (
+          <p className="text-xs text-gray-400 text-right -mt-2">연속 검색 방지: {cooldown}초 후 재검색 가능</p>
+        )}
       </form>
 
       {error && (

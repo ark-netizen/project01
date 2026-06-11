@@ -1,49 +1,39 @@
+import time
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
-from services.twitter_crawler import login, logout, is_logged_in, search_tweets
+from services.twitter_crawler import is_ready, search_tweets
 from services.sentiment import analyze_batch, summarize
 from services.keywords import extract_keywords
 
 router = APIRouter(prefix="/api/twitter", tags=["twitter"])
 
-
-class LoginRequest(BaseModel):
-    username: str
-    email: str
-    password: str
-
-
-@router.post("/login")
-async def twitter_login(body: LoginRequest):
-    try:
-        await login(body.username, body.email, body.password)
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"로그인 실패: {e}")
-    return {"status": "ok"}
-
-
-@router.post("/logout")
-async def twitter_logout():
-    await logout()
-    return {"status": "ok"}
+_last_search: float = 0
+COOLDOWN = 10  # 초
 
 
 @router.get("/status")
 def twitter_status():
-    return {"logged_in": is_logged_in()}
+    return {"ready": is_ready()}
 
 
 @router.get("/search")
 async def twitter_search(
     keyword: str = Query(..., min_length=1, max_length=100),
-    count: int = Query(default=50, ge=10, le=100),
-    since: str = Query(default=None, description="YYYY-MM-DD"),
-    until: str = Query(default=None, description="YYYY-MM-DD"),
+    count: int = Query(default=30, ge=10, le=50),
+    since: str = Query(default=None),
+    until: str = Query(default=None),
 ):
-    if not is_logged_in():
-        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    global _last_search
 
-    # Twitter 검색 문법으로 날짜 범위 추가
+    if not is_ready():
+        raise HTTPException(status_code=503, detail="Twitter 서비스가 설정되지 않았습니다.")
+
+    # 서버 측 쿨다운
+    elapsed = time.time() - _last_search
+    if elapsed < COOLDOWN:
+        remaining = int(COOLDOWN - elapsed) + 1
+        raise HTTPException(status_code=429, detail=f"{remaining}초 후 다시 시도해주세요.")
+    _last_search = time.time()
+
     query = keyword
     if since:
         query += f" since:{since}"
@@ -53,21 +43,20 @@ async def twitter_search(
     try:
         tweets = await search_tweets(query, count=count)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"크롤링 실패: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
     if not tweets:
-        return {"keyword": keyword, "items": [], "summary": summarize([], [])}
+        return {"keyword": keyword, "items": [], "summary": summarize([], []), "keywords": []}
 
     texts = [t["text"] for t in tweets]
     sentiments = analyze_batch(texts)
-
-    items = [{**tweet, "sentiment": sentiment} for tweet, sentiment in zip(tweets, sentiments)]
-
+    items = [{**tweet, "sentiment": s} for tweet, s in zip(tweets, sentiments)]
     errors = [s for s in sentiments if s.get("error")]
+
     return {
         "keyword": keyword,
         "items": items,
         "summary": summarize(sentiments, tweets),
-        "keywords": extract_keywords([t["text"] for t in tweets]),
+        "keywords": extract_keywords(texts),
         "sentiment_error": errors[0]["error"] if errors and len(errors) == len(sentiments) else None,
     }

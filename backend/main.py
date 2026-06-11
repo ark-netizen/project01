@@ -21,6 +21,12 @@ app.include_router(twitter.router)
 app.include_router(youtube.router)
 
 
+@app.on_event("startup")
+async def startup():
+    from services.twitter_crawler import initialize
+    await initialize()
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
