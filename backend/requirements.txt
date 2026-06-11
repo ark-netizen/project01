@@ -16,4 +16,7 @@ requests
 # YouTube 날짜 파싱
 dateparser
 
+# Python 3.13 cgi 모듈 제거 호환용 (twikit/httpx 의존성)
+legacy-cgi
+
 pydantic
