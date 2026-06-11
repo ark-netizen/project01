@@ -38,6 +38,12 @@ jobs:
         env:
           VITE_API_BASE: ${{ secrets.VITE_API_BASE }}
 
+      - name: Add .nojekyll
+        run: touch frontend/dist/.nojekyll
+
+      - name: Verify dist
+        run: ls -la frontend/dist
+
       - uses: actions/configure-pages@v4
 
       - uses: actions/upload-pages-artifact@v3
