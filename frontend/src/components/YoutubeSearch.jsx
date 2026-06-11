@@ -266,9 +266,8 @@ export default function YoutubeSearch() {
             </div>
           )}
           <div className="flex gap-5 items-start">
-            <div className="flex-1 flex flex-col gap-5 min-w-0">
+            <div className="flex-1 min-w-0">
               <SentimentChart summary={result.summary} />
-              <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
             </div>
             {result.summary?.top_accounts?.length > 0 && (
               <div className="w-52 shrink-0">
@@ -276,7 +275,14 @@ export default function YoutubeSearch() {
               </div>
             )}
           </div>
-          <ItemList items={result.items} type="youtube" filterKeyword={selectedKeyword} />
+          <div className="flex gap-5 items-start">
+            <div className="flex-1 min-w-0">
+              <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <ItemList items={result.items} type="youtube" filterKeyword={selectedKeyword} />
+            </div>
+          </div>
         </>
       )}
     </div>

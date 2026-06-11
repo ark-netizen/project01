@@ -194,10 +194,22 @@ export default function TwitterSearch() {
       )}
       {result && (
         <>
-          <SentimentChart summary={result.summary} />
-          <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
-          <TopAccounts accounts={result.summary.top_accounts} type="twitter" />
-          <ItemList items={result.items} type="twitter" filterKeyword={selectedKeyword} />
+          <div className="flex gap-5 items-start">
+            <div className="flex-1 min-w-0">
+              <SentimentChart summary={result.summary} />
+            </div>
+            <div className="w-52 shrink-0">
+              <TopAccounts accounts={result.summary.top_accounts} type="twitter" vertical />
+            </div>
+          </div>
+          <div className="flex gap-5 items-start">
+            <div className="flex-1 min-w-0">
+              <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <ItemList items={result.items} type="twitter" filterKeyword={selectedKeyword} />
+            </div>
+          </div>
         </>
       )}
     </div>
