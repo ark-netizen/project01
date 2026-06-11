@@ -20,10 +20,25 @@ def _patch_twikit():
 
     try:
         import twikit.client_transaction as ct
+
+        # __init__을 래핑해서 key 속성을 항상 초기화
+        _orig_init = ct.ClientTransaction.__init__
+        def _safe_init(self, *args, **kwargs):
+            try:
+                _orig_init(self, *args, **kwargs)
+            except Exception:
+                pass
+            try:
+                self.key = None
+            except Exception:
+                pass
+            try:
+                self.key_bytes_indices = []
+            except Exception:
+                pass
+
+        ct.ClientTransaction.__init__ = _safe_init
         ct.ClientTransaction.get_transaction_id = _no_txn
-        # 'key' 속성도 직접 접근하므로 None으로 미리 설정
-        ct.ClientTransaction.key = None
-        ct.ClientTransaction.key_bytes_indices = []
     except Exception:
         pass
 
