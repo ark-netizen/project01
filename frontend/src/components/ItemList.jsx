@@ -49,12 +49,10 @@ export default function ItemList({ items, type, filterKeyword, filterSentiment }
         <h3 className="text-lg font-semibold text-gray-700">
           {type === 'twitter' ? '트윗 목록' : '댓글 목록'}
         </h3>
-        {isFiltered && (
-          <span className="text-xs text-indigo-600 bg-indigo-50 rounded-full px-2.5 py-1">
-            {filtered.length}건 / 전체 {items.length}건
-            {filterSentiment && ` · ${SENTIMENT_LABEL[filterSentiment]}`}
-          </span>
-        )}
+        <span className="text-xs text-indigo-600 bg-indigo-50 rounded-full px-2.5 py-1">
+          {isFiltered ? `${filtered.length}건 / ` : ''}{items.length}건
+          {filterSentiment && ` · ${SENTIMENT_LABEL[filterSentiment]}`}
+        </span>
       </div>
 
       {filtered.length === 0 ? (
