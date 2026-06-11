@@ -2,9 +2,9 @@ import re
 import os
 import requests as _requests
 
-# 소셜미디어 다국어(한국어 포함) 감성분석 모델
+# HuggingFace 2024 신규 라우터 엔드포인트
 HF_API_URL = (
-    "https://api-inference.huggingface.co/models/"
+    "https://router.huggingface.co/hf-inference/models/"
     "cardiffnlp/twitter-xlm-roberta-base-sentiment"
 )
 
