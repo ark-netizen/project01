@@ -4,6 +4,8 @@ python-dotenv
 
 # Twitter 비공식 크롤링 (2.3+는 KEY_BYTE 오류 있어서 2.2.x 사용)
 twikit>=2.2,<2.3
+# twikit 내부 httpx: 0.28+에서 proxies 인자 제거됨 → 핀 고정
+httpx>=0.24.0,<0.28.0
 
 # YouTube 댓글 크롤링 (API키 불필요)
 youtube-comment-downloader
