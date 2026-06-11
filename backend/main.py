@@ -67,6 +67,8 @@ def debug_ct_consts():
         CT = mod.ClientTransaction
         return {k: repr(v) for k, v in vars(CT).items()
                 if not k.startswith("__") and not callable(v)}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
