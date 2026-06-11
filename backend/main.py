@@ -64,13 +64,7 @@ def debug_twikit_ct_source():
     import inspect, importlib
     try:
         mod = importlib.import_module("twikit.guest.client")
-        ct = getattr(mod, "ClientTransaction", None)
-        if ct is None:
-            return {"error": "ClientTransaction not found"}
-        return {
-            "source": inspect.getsource(ct),
-            "module": "twikit.guest.client",
-        }
+        return {"source": inspect.getsource(mod)}
     except Exception as e:
         return {"error": str(e)}
 
