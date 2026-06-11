@@ -144,17 +144,28 @@ def _init_ct() -> None:
     if not (_CTClass and _USE_CURL):
         _ct_info = f"no_CT({_twikit_diag},curl={_USE_CURL})"
         return
-    try:
-        r = curl_req.get(
-            "https://x.com/",
-            headers={"Accept": "text/html,*/*", "Accept-Language": "en-US,en;q=0.9",
-                     "Cache-Control": "no-cache"},
-            impersonate="chrome120", timeout=20,
-        )
-        _ct_obj = _CTClass(_FakeResp(r.text))
-        _ct_info = "CT_OK"
-    except Exception as e:
-        _ct_info = f"CT_err:{str(e)[:50]}"
+    # twikit 2.3.x: ClientTransaction() takes no args (fetches homepage internally)
+    # twikit 2.0-2.2.x: ClientTransaction(response) takes a response object
+    for attempt in ("noarg", "resp"):
+        try:
+            if attempt == "noarg":
+                ct = _CTClass()
+            else:
+                r = curl_req.get(
+                    "https://x.com/",
+                    headers={"Accept": "text/html,*/*",
+                             "Accept-Language": "en-US,en;q=0.9",
+                             "Cache-Control": "no-cache"},
+                    impersonate="chrome120", timeout=20,
+                )
+                ct = _CTClass(_FakeResp(r.text))
+            # Verify it can generate an ID
+            ct.generate_transaction_id("GET", "/i/api/graphql/test/SearchTimeline")
+            _ct_obj = ct
+            _ct_info = f"CT_OK_{attempt}"
+            return
+        except Exception as e:
+            _ct_info = f"CT_err_{attempt}:{str(e)[:50]}"
 
 
 def _txn_id(method: str, path: str) -> str:
