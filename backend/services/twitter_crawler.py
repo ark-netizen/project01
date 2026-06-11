@@ -1,6 +1,8 @@
 import os
+import re
 import json
 import asyncio
+import threading
 
 try:
     from curl_cffi import requests as curl_req
@@ -18,8 +20,8 @@ _BEARER = (
     "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 )
 
-# GraphQL SearchTimeline query IDs — try multiple in case one is outdated
-_GRAPHQL_QIDS = [
+# Fallback query IDs (may be outdated — dynamic fetch is preferred)
+_FALLBACK_QIDS = [
     "nK1dw4oV3k4w5TdtcAdSww",
     "gkjsKepM6gl_HmFWoWKfgg",
     "7jMcZ7NW_rL6MHT9WnRFkg",
@@ -50,6 +52,10 @@ _FEATURES = json.dumps({
 
 _FIELD_TOGGLES = json.dumps({"withArticleRichContentState": False}, separators=(',', ':'))
 
+# Cached live query ID
+_live_qid: str | None = None
+_qid_lock = threading.Lock()
+
 
 def _redact(msg: str) -> str:
     for val in (_auth_token, _ct0):
@@ -58,10 +64,71 @@ def _redact(msg: str) -> str:
     return msg
 
 
+def _fetch_live_query_id() -> str | None:
+    """Fetch the current SearchTimeline queryId from x.com JS bundles."""
+    if not _USE_CURL:
+        return None
+    curl_kw = {"impersonate": "chrome120"}
+    try:
+        r = curl_req.get(
+            "https://x.com/search?q=test&f=live",
+            headers={"Accept": "text/html,application/xhtml+xml,*/*",
+                     "Accept-Language": "en-US,en;q=0.9"},
+            timeout=20, **curl_kw,
+        )
+        if not r.text:
+            return None
+
+        # Collect JS bundle URLs from the page
+        js_urls: list[str] = re.findall(
+            r'https://abs\.twimg\.com/responsive-web/client-web/[^\s"\']+\.js',
+            r.text,
+        )
+        # Also try relative paths
+        for rel in re.findall(r'"(/responsive-web/client-web/[^\s"\']+\.js)"', r.text):
+            js_urls.append("https://abs.twimg.com" + rel)
+
+        seen: set[str] = set()
+        for url in js_urls[:12]:
+            if url in seen:
+                continue
+            seen.add(url)
+            try:
+                jr = curl_req.get(url, timeout=15, **curl_kw)
+                if not jr.text:
+                    continue
+                for pattern in (
+                    r'queryId:"([A-Za-z0-9_-]{20,})"[^"]{0,80}operationName:"SearchTimeline"',
+                    r'operationName:"SearchTimeline"[^"]{0,80}queryId:"([A-Za-z0-9_-]{20,})"',
+                    r'"SearchTimeline"[^"]{0,40}"([A-Za-z0-9_-]{20,})"',
+                ):
+                    m = re.search(pattern, jr.text)
+                    if m:
+                        return m.group(1)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 async def initialize() -> None:
     global _auth_token, _ct0
     _auth_token = os.getenv("TWITTER_AUTH_TOKEN", "").strip()
     _ct0 = os.getenv("TWITTER_CT0", "").strip()
+    # Warm up the live query ID in the background
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _warm_query_id)
+
+
+def _warm_query_id() -> None:
+    global _live_qid
+    with _qid_lock:
+        if _live_qid:
+            return
+        qid = _fetch_live_query_id()
+        if qid:
+            _live_qid = qid
 
 
 def is_ready() -> bool:
@@ -89,14 +156,12 @@ def _parse_graphql(data: dict) -> list[dict] | None:
         for entry in raw_entries:
             content = entry.get("content") or entry.get("item") or {}
             item_content = content.get("itemContent", {})
-
             if item_content.get("itemType") != "TimelineTweet":
                 continue
 
             result = item_content.get("tweet_results", {}).get("result", {})
             if not result:
                 continue
-
             if result.get("__typename") == "TweetWithVisibilityResults":
                 result = result.get("tweet", result)
 
@@ -122,7 +187,50 @@ def _parse_graphql(data: dict) -> list[dict] | None:
     return tweets if tweets else None
 
 
+def _try_qid(qid: str, base: str, headers: dict, cookies: dict, variables: str) -> list[dict] | str:
+    """Return tweets list on success, or error string on failure."""
+    url = f"{base}/i/api/graphql/{qid}/SearchTimeline"
+    tag = f"[{base.split('/')[2][:5]}:{qid[:8]}]"
+    curl_kw = {"impersonate": "chrome120"} if _USE_CURL else {}
+    try:
+        r = curl_req.get(
+            url, headers=headers, cookies=cookies,
+            params={"variables": variables, "features": _FEATURES, "fieldToggles": _FIELD_TOGGLES},
+            timeout=15, **curl_kw,
+        )
+        status = r.status_code
+        if status == 404:
+            return f"{tag} qid만료(404)"
+        if status in (401, 403):
+            return f"{tag} 인증오류({status})"
+        if status == 429:
+            raise RuntimeError("Twitter 요청 한도 초과: 잠시 후 다시 시도해주세요.")
+        if not r.content or not r.content.strip():
+            return f"{tag} 빈응답({status})"
+        try:
+            data = r.json()
+        except ValueError:
+            return f"{tag} JSON오류({status}): {r.text[:60]}"
+
+        if "errors" in data and data["errors"]:
+            msgs = "; ".join(e.get("message", "?")[:40] for e in data["errors"][:2])
+            return f"{tag} API오류: {msgs}"
+
+        tweets = _parse_graphql(data)
+        if tweets is not None:
+            return tweets
+        if "data" in data:
+            return []
+        return f"{tag} 파싱실패 keys={list(data.keys())[:4]}"
+    except RuntimeError:
+        raise
+    except Exception as e:
+        return f"{tag} 예외: {_redact(str(e))[:80]}"
+
+
 def _search_sync(keyword: str, count: int) -> list[dict]:
+    global _live_qid
+
     headers = {
         "Authorization": f"Bearer {_BEARER}",
         "x-csrf-token": _ct0,
@@ -142,60 +250,39 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         "product": "Latest",
     }, separators=(',', ':'))
 
-    # curl_cffi extra kwargs — ignored if falling back to requests
-    extra = {"impersonate": "chrome120"} if _USE_CURL else {}
+    # Build ordered list: live qid first, then fallbacks
+    qids = []
+    if _live_qid:
+        qids.append(_live_qid)
+    for q in _FALLBACK_QIDS:
+        if q not in qids:
+            qids.append(q)
 
+    all_404 = True
     errors = []
-    for qid in _GRAPHQL_QIDS:
+    for qid in qids:
         for base in ("https://x.com", "https://twitter.com"):
-            url = f"{base}/i/api/graphql/{qid}/SearchTimeline"
-            tag = f"[{base.split('/')[2][:5]}:{qid[:8]}]"
-            try:
-                r = curl_req.get(
-                    url,
-                    headers=headers,
-                    cookies=cookies,
-                    params={
-                        "variables": variables,
-                        "features": _FEATURES,
-                        "fieldToggles": _FIELD_TOGGLES,
-                    },
-                    timeout=15,
-                    **extra,
-                )
-                status = r.status_code
-                if status in (401, 403):
-                    errors.append(f"{tag} 인증오류({status})")
-                    continue
-                if status == 429:
-                    raise RuntimeError("Twitter 요청 한도 초과: 잠시 후 다시 시도해주세요.")
-                if not r.content or not r.content.strip():
-                    errors.append(f"{tag} 빈응답(status={status})")
-                    continue
-                try:
-                    data = r.json()
-                except ValueError:
-                    errors.append(f"{tag} JSON오류({status}): {r.text[:60]}")
-                    continue
+            result = _try_qid(qid, base, headers, cookies, variables)
+            if isinstance(result, list):
+                return result
+            errors.append(result)
+            if "qid만료(404)" not in result:
+                all_404 = False
 
-                if "errors" in data and data["errors"]:
-                    msgs = "; ".join(e.get("message", "?")[:40] for e in data["errors"][:2])
-                    errors.append(f"{tag} API오류: {msgs}")
-                    continue
+    # All were 404 → try to fetch live qid and retry once
+    if all_404:
+        fresh = _fetch_live_query_id()
+        if fresh and fresh not in qids:
+            with _qid_lock:
+                _live_qid = fresh
+            for base in ("https://x.com", "https://twitter.com"):
+                result = _try_qid(fresh, base, headers, cookies, variables)
+                if isinstance(result, list):
+                    return result
+                errors.append(f"[live:{fresh[:8]}] {result}")
 
-                tweets = _parse_graphql(data)
-                if tweets is not None:
-                    return tweets
-                if "data" in data:
-                    return []
-                errors.append(f"{tag} 파싱실패 keys={list(data.keys())[:4]}")
-            except RuntimeError:
-                raise
-            except Exception as e:
-                errors.append(f"{tag} 예외: {_redact(str(e))[:80]}")
-
-    curl_info = f"(curl_cffi={'on' if _USE_CURL else 'off'})"
-    raise RuntimeError(f"Twitter 검색 실패 {curl_info}: " + " / ".join(errors))
+    curl_info = f"curl_cffi={'on' if _USE_CURL else 'off'}"
+    raise RuntimeError(f"Twitter 검색 실패 ({curl_info}): " + " / ".join(errors))
 
 
 async def search_tweets(keyword: str, count: int = 30) -> list[dict]:
