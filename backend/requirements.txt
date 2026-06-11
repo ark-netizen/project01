@@ -2,23 +2,15 @@ fastapi
 uvicorn[standard]
 python-dotenv
 
-# Twitter 비공식 크롤링 (2.3+는 KEY_BYTE 오류 있어서 2.2.x 사용)
-twikit>=2.2,<2.3
-# twikit 내부 httpx: 0.28+에서 proxies 인자 제거됨 → 핀 고정
-httpx>=0.24.0,<0.28.0
-
 # YouTube 댓글 크롤링 (API키 불필요)
 youtube-comment-downloader
 # YouTube 키워드 영상 검색 (API키 불필요)
 youtube-search-python
 
-# HuggingFace Inference API 호출
+# HTTP 요청 (Twitter 직접 호출 + HuggingFace)
 requests<3
 
 # YouTube 날짜 파싱
 dateparser
-
-# Python 3.13 cgi 모듈 제거 호환용 (twikit/httpx 의존성)
-legacy-cgi
 
 pydantic
