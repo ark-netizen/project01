@@ -28,8 +28,10 @@ def _patch_twikit():
             self.key_bytes_indices = []
 
         def __getattr__(self, name):
-            # 정의되지 않은 모든 속성 → None 반환
-            return None
+            # 정의되지 않은 속성 접근 시 호출 가능한 no-op 반환
+            async def _noop(*a, **k):
+                return None
+            return _noop
 
         async def get_transaction_id(self, *args, **kwargs):
             return ""
