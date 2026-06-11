@@ -53,6 +53,12 @@ def translate_text(body: dict):
         return {"translated": text, "error": "번역 실패"}
 
 
+@app.get("/api/debug/twitter")
+def debug_twitter():
+    from services.twitter_crawler import debug_info
+    return debug_info()
+
+
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "ok"}

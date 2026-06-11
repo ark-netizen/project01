@@ -7,6 +7,7 @@ import secrets
 import asyncio
 import threading
 import importlib
+import pkgutil
 
 try:
     from curl_cffi import requests as curl_req
@@ -14,23 +15,6 @@ try:
 except ImportError:
     import requests as curl_req  # type: ignore[no-redef]
     _USE_CURL = False
-
-# Try every known location for twikit's ClientTransaction
-_CTClass = None
-for _mod_path, _cls_name in [
-    ("twikit._core.utils", "ClientTransaction"),
-    ("twikit.utils",       "ClientTransaction"),
-    ("twikit._core",       "ClientTransaction"),
-    ("twikit",             "ClientTransaction"),
-]:
-    try:
-        _m = importlib.import_module(_mod_path)
-        _c = getattr(_m, _cls_name, None)
-        if _c is not None:
-            _CTClass = _c
-            break
-    except Exception:
-        pass
 
 _auth_token: str = ""
 _ct0: str = ""
@@ -40,13 +24,11 @@ _BEARER = (
     "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs"
     "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 )
-
 _FALLBACK_QIDS = [
     "nK1dw4oV3k4w5TdtcAdSww",
     "gkjsKepM6gl_HmFWoWKfgg",
     "7jMcZ7NW_rL6MHT9WnRFkg",
 ]
-
 _FEATURES = json.dumps({
     "rweb_lists_timeline_redesign_enabled": True,
     "responsive_web_graphql_exclude_directive_enabled": True,
@@ -69,13 +51,14 @@ _FEATURES = json.dumps({
     "responsive_web_media_download_video_enabled": False,
     "responsive_web_enhance_cards_enabled": False,
 }, separators=(',', ':'))
-
 _FIELD_TOGGLES = json.dumps({"withArticleRichContentState": False}, separators=(',', ':'))
 
 _live_qid: str | None = None
 _guest_token: str | None = None
 _ct_obj = None
+_CTClass = None
 _ct_info: str = "not_init"
+_twikit_diag: str = "not_init"
 _qid_lock = threading.Lock()
 _CLIENT_UUID = str(uuid.uuid4())
 
@@ -87,10 +70,52 @@ def _redact(msg: str) -> str:
     return msg
 
 
-# ─── guest token ──────────────────────────────────────────────────
+# ─── twikit discovery (pkgutil full scan) ────────────────────────
+
+def _discover_twikit() -> None:
+    global _CTClass, _twikit_diag
+    try:
+        import twikit as _tw
+        ver = getattr(_tw, "__version__", "?")
+        _twikit_diag = f"v{ver}"
+
+        # Check __init__ exports first
+        ct = getattr(_tw, "ClientTransaction", None)
+        if ct:
+            _CTClass = ct
+            _twikit_diag += ",CT@__init__"
+            return
+
+        # Walk every submodule
+        found_at = None
+        for _, modname, _ in pkgutil.walk_packages(
+            path=_tw.__path__, prefix="twikit.", onerror=lambda _: None
+        ):
+            try:
+                mod = importlib.import_module(modname)
+                ct = getattr(mod, "ClientTransaction", None)
+                if ct:
+                    _CTClass = ct
+                    found_at = modname
+                    break
+            except Exception:
+                pass
+
+        if found_at:
+            _twikit_diag += f",CT@{found_at}"
+        else:
+            top = [a for a in dir(_tw) if not a.startswith("_")][:8]
+            _twikit_diag += f",CT_not_found,top={top}"
+
+    except ImportError as e:
+        _twikit_diag = f"not_installed:{str(e)[:40]}"
+    except Exception as e:
+        _twikit_diag = f"err:{str(e)[:50]}"
+
+
+# ─── guest token ─────────────────────────────────────────────────
 
 def _activate_guest_token() -> str | None:
-    """GET a guest token from api.twitter.com — required for session init."""
     if not _USE_CURL:
         return None
     try:
@@ -107,7 +132,7 @@ def _activate_guest_token() -> str | None:
     return None
 
 
-# ─── ClientTransaction (twikit) ───────────────────────────────────
+# ─── ClientTransaction ────────────────────────────────────────────
 
 class _FakeResp:
     def __init__(self, text: str):
@@ -117,7 +142,7 @@ class _FakeResp:
 def _init_ct() -> None:
     global _ct_obj, _ct_info
     if not (_CTClass and _USE_CURL):
-        _ct_info = f"no_CT(twikit={bool(_CTClass)},curl={_USE_CURL})"
+        _ct_info = f"no_CT({_twikit_diag},curl={_USE_CURL})"
         return
     try:
         r = curl_req.get(
@@ -195,6 +220,62 @@ def _fetch_qid() -> tuple[str | None, str]:
     return None, "; ".join(debug)
 
 
+# ─── twikit.Client high-level search (primary) ───────────────────
+
+async def _search_via_twikit_client(keyword: str, count: int) -> list[dict] | None:
+    """
+    Use twikit.Client high-level API.
+    twikit handles x-client-transaction-id internally (using curl_cffi).
+    """
+    global _twikit_diag
+    try:
+        import twikit
+        client = twikit.Client("en-US")
+
+        # Inject auth cookies — try multiple methods
+        cookies_set = False
+        if hasattr(client, "set_cookies"):
+            client.set_cookies({"auth_token": _auth_token, "ct0": _ct0})
+            cookies_set = True
+        elif hasattr(client, "http") and hasattr(client.http, "cookies"):
+            client.http.cookies.update({"auth_token": _auth_token, "ct0": _ct0})
+            cookies_set = True
+        elif hasattr(client, "_session") and hasattr(client._session, "cookies"):
+            client._session.cookies.update({"auth_token": _auth_token, "ct0": _ct0})
+            cookies_set = True
+
+        if not cookies_set:
+            _twikit_diag += ",no_cookie_method"
+            return None
+
+        results = await client.search_tweet(keyword, "Latest", count=count)
+        tweets: list[dict] = []
+        for tweet in results:
+            try:
+                tweets.append({
+                    "id": str(tweet.id),
+                    "text": tweet.text or "",
+                    "user": tweet.user.screen_name if tweet.user else "unknown",
+                    "created_at": str(tweet.created_at or ""),
+                    "likes": tweet.favorite_count or 0,
+                    "retweets": tweet.retweet_count or 0,
+                })
+            except Exception:
+                pass
+        _twikit_diag += f",found={len(tweets)}"
+        return tweets
+
+    except ImportError:
+        _twikit_diag = "not_installed"
+        return None
+    except Exception as e:
+        err = _redact(str(e))[:80]
+        _twikit_diag += f",tw_err:{err}"
+        return None
+
+
+# ─── initialize & warm ───────────────────────────────────────────
+
 async def initialize() -> None:
     global _auth_token, _ct0, _live_qid
     _auth_token = os.getenv("TWITTER_AUTH_TOKEN", "").strip()
@@ -207,6 +288,7 @@ async def initialize() -> None:
 
 def _warm() -> None:
     global _live_qid, _guest_token
+    _discover_twikit()
     _init_ct()
     gt = _activate_guest_token()
     if gt:
@@ -221,6 +303,17 @@ def _warm() -> None:
 
 def is_ready() -> bool:
     return bool(_auth_token and _ct0)
+
+
+def debug_info() -> dict:
+    return {
+        "curl_cffi": _USE_CURL,
+        "twikit_diag": _twikit_diag,
+        "ct_info": _ct_info,
+        "ct_class_found": _CTClass is not None,
+        "guest_token_ok": bool(_guest_token),
+        "live_qid": (_live_qid[:12] + "...") if _live_qid else None,
+    }
 
 
 # ─── response parsing ─────────────────────────────────────────────
@@ -269,7 +362,7 @@ def _parse_graphql(data: dict) -> list[dict] | None:
     return tweets if tweets else None
 
 
-# ─── search ───────────────────────────────────────────────────────
+# ─── manual GraphQL fallback ──────────────────────────────────────
 
 _BASES = [
     "https://x.com/i/api/graphql",
@@ -278,14 +371,11 @@ _BASES = [
 
 
 def _try(qid: str, base: str, headers: dict, cookies: dict,
-         variables: str, feats: bool = True) -> list[dict] | str:
+         variables: str) -> list[dict] | str:
     url = f"{base}/{qid}/SearchTimeline"
-    short = url.replace("https://", "").replace("twitter.com", "tw.com")[:48]
+    short = url.replace("https://", "").replace("twitter.com", "tw.com")[:50]
     ck = {"impersonate": "chrome120"} if _USE_CURL else {}
-    params: dict = {"variables": variables}
-    if feats:
-        params["features"] = _FEATURES
-        params["fieldToggles"] = _FIELD_TOGGLES
+    params = {"variables": variables, "features": _FEATURES, "fieldToggles": _FIELD_TOGGLES}
     try:
         r = curl_req.get(url, headers=headers, cookies=cookies,
                          params=params, timeout=15, **ck)
@@ -317,7 +407,7 @@ def _try(qid: str, base: str, headers: dict, cookies: dict,
         return f"[{short}] 예외: {_redact(str(e))[:80]}"
 
 
-def _search_sync(keyword: str, count: int) -> list[dict]:
+def _search_manual(keyword: str, count: int) -> list[dict]:
     global _live_qid, _guest_token
 
     qids: list[str] = []
@@ -327,14 +417,20 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         if q not in qids:
             qids.append(q)
 
-    errors: list[str] = []
-    all_404 = True
-
-    # Refresh guest token if missing
     if not _guest_token:
         gt = _activate_guest_token()
         if gt:
             _guest_token = gt
+
+    errors: list[str] = []
+    all_404 = True
+    cookies = {"auth_token": _auth_token, "ct0": _ct0}
+    variables = json.dumps({
+        "rawQuery": keyword,
+        "count": count,
+        "querySource": "typed_query",
+        "product": "Latest",
+    }, separators=(",", ":"))
 
     for qid in qids:
         path = f"/i/api/graphql/{qid}/SearchTimeline"
@@ -353,14 +449,6 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         }
         if _guest_token:
             headers["x-guest-token"] = _guest_token
-        cookies = {"auth_token": _auth_token, "ct0": _ct0}
-        variables = json.dumps({
-            "rawQuery": keyword,
-            "count": count,
-            "querySource": "typed_query",
-            "product": "Latest",
-        }, separators=(',', ':'))
-
         for base in _BASES:
             res = _try(qid, base, headers, cookies, variables)
             if isinstance(res, list):
@@ -369,7 +457,6 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
             if "404" not in res:
                 all_404 = False
 
-    # All 404 → fresh qid fetch
     if all_404:
         fresh, dbg = _fetch_qid()
         if fresh and fresh not in qids:
@@ -387,18 +474,28 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
             errors.append(f"[same_qid:{dbg}]")
 
     raise RuntimeError(
-        f"Twitter 검색 실패 (curl={'on' if _USE_CURL else 'off'},CT={_ct_info},"
-        f"gt={'on' if _guest_token else 'off'}): " + " / ".join(errors)
+        f"Twitter 검색 실패 (curl={'on' if _USE_CURL else 'off'},"
+        f"CT={_ct_info},gt={'on' if _guest_token else 'off'},"
+        f"twikit={_twikit_diag}): " + " / ".join(errors)
     )
 
+
+# ─── public API ───────────────────────────────────────────────────
 
 async def search_tweets(keyword: str, count: int = 30) -> list[dict]:
     if not is_ready():
         raise RuntimeError("Twitter 서비스가 설정되지 않았습니다.")
     count = min(count, MAX_COUNT)
+
+    # Primary: twikit.Client (handles transaction ID internally)
+    result = await _search_via_twikit_client(keyword, count)
+    if result is not None:
+        return result
+
+    # Fallback: manual GraphQL
     loop = asyncio.get_event_loop()
     try:
-        return await loop.run_in_executor(None, lambda: _search_sync(keyword, count))
+        return await loop.run_in_executor(None, lambda: _search_manual(keyword, count))
     except RuntimeError:
         raise
     except Exception as e:
