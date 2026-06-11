@@ -14,6 +14,18 @@ except ImportError:
     import requests as curl_req  # type: ignore[no-redef]
     _USE_CURL = False
 
+# Try to load twikit's ClientTransaction for proper x-client-transaction-id generation
+_CTClass = None
+for _mod_path in ("twikit._core.utils", "twikit.utils"):
+    try:
+        import importlib
+        _m = importlib.import_module(_mod_path)
+        _CTClass = getattr(_m, "ClientTransaction", None)
+        if _CTClass:
+            break
+    except Exception:
+        pass
+
 _auth_token: str = ""
 _ct0: str = ""
 MAX_COUNT = 50
@@ -54,10 +66,10 @@ _FEATURES = json.dumps({
 
 _FIELD_TOGGLES = json.dumps({"withArticleRichContentState": False}, separators=(',', ':'))
 
-# Cached live query ID
 _live_qid: str | None = None
+_ct_obj = None          # twikit ClientTransaction instance (if available)
+_ct_init_err: str = ""  # debug info about CT init
 _qid_lock = threading.Lock()
-# Stable session UUID (generated once, reused per process lifetime)
 _CLIENT_UUID = str(uuid.uuid4())
 
 
@@ -68,101 +80,117 @@ def _redact(msg: str) -> str:
     return msg
 
 
-def _rand_txn_id() -> str:
-    """Generate a plausible-looking x-client-transaction-id."""
+# ─────────────────────────────────────────────────────────────────
+# transaction-id helpers
+# ─────────────────────────────────────────────────────────────────
+
+class _FakeResp:
+    """Duck-typed httpx.Response substitute for twikit.ClientTransaction."""
+    def __init__(self, text: str):
+        self.text = text
+
+
+def _init_client_transaction() -> None:
+    global _ct_obj, _ct_init_err
+    if not (_CTClass and _USE_CURL):
+        _ct_init_err = f"CT unavailable (twikit={bool(_CTClass)}, curl={_USE_CURL})"
+        return
+    try:
+        r = curl_req.get(
+            "https://x.com/",
+            headers={"Accept": "text/html,*/*", "Accept-Language": "en-US,en;q=0.9",
+                     "Cache-Control": "no-cache"},
+            impersonate="chrome120", timeout=20,
+        )
+        _ct_obj = _CTClass(_FakeResp(r.text))
+        _ct_init_err = "CT_OK"
+    except Exception as e:
+        _ct_init_err = f"CT_err:{str(e)[:60]}"
+
+
+def _get_txn_id(method: str, path: str) -> str:
+    if _ct_obj is not None:
+        try:
+            return _ct_obj.generate_transaction_id(method, path)
+        except Exception:
+            pass
     return base64.b64encode(secrets.token_bytes(30)).decode().rstrip("=")
 
 
+# ─────────────────────────────────────────────────────────────────
+# query-id detection
+# ─────────────────────────────────────────────────────────────────
+
 def _find_qid_in_text(text: str) -> str | None:
-    """
-    Extract SearchTimeline queryId from JS/HTML text.
-    Uses (?![A-Za-z]) boundary to avoid matching 'SearchTimelineXxx'.
-    Uses ONLY forward patterns (queryId→operationName) — never reverse.
-    Always forces /i/api/graphql base (ignores /graphql without /i/api).
-    """
-    # Highest confidence: full /i/api/graphql URL with SearchTimeline
     m = re.search(
-        r'/i/api/graphql/([A-Za-z0-9_-]{15,})/SearchTimeline(?![A-Za-z])',
-        text,
-    )
+        r'/i/api/graphql/([A-Za-z0-9_-]{15,})/SearchTimeline(?![A-Za-z])', text)
     if m:
         return m.group(1)
-
-    # queryId immediately before operationName:"SearchTimeline" (forward only)
     for pat in (
         r'queryId:"([A-Za-z0-9_-]{15,})"[^}]{0,250}operationName:"SearchTimeline"(?![A-Za-z])',
-        r'"queryId"\s*:\s*"([A-Za-z0-9_-]{15,})"[^}]{0,250}"operationName"\s*:\s*"SearchTimeline"(?![A-Za-z])',
+        r'"queryId":"([A-Za-z0-9_-]{15,})"[^}]{0,250}"operationName":"SearchTimeline"(?![A-Za-z])',
     ):
         m = re.search(pat, text)
         if m:
             return m.group(1)
-
     return None
 
 
 def _fetch_live_qid() -> tuple[str | None, str]:
-    """Returns (queryId, debug_info)."""
     if not _USE_CURL:
-        return None, "curl_cffi not installed"
+        return None, "no curl_cffi"
     curl_kw = {"impersonate": "chrome120"}
     debug: list[str] = []
     try:
         page = curl_req.get(
             "https://x.com/",
-            headers={
-                "Accept": "text/html,application/xhtml+xml,*/*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-            },
+            headers={"Accept": "text/html,*/*", "Accept-Language": "en-US,en;q=0.9",
+                     "Cache-Control": "no-cache"},
             timeout=20, **curl_kw,
         )
         html = page.text or ""
         debug.append(f"html={len(html)}")
-
         qid = _find_qid_in_text(html)
         if qid:
-            return qid, "found_in_html"
-
-        js_urls: list[str] = list(dict.fromkeys(
-            re.findall(
-                r'https://abs\.twimg\.com/responsive-web/client-web/[^\s"\'<>]+\.js',
-                html,
-            )
-        ))
-        # Prefer bundles likely to contain API definitions
-        js_urls.sort(key=lambda u: (0 if any(k in u for k in ("main", "api", "bundle")) else 1))
+            return qid, "in_html"
+        js_urls = list(dict.fromkeys(re.findall(
+            r'https://abs\.twimg\.com/responsive-web/client-web/[^\s"\'<>]+\.js', html)))
+        js_urls.sort(key=lambda u: (0 if any(k in u for k in ("main", "api")) else 1))
         debug.append(f"bundles={len(js_urls)}")
-
-        for js_url in js_urls[:20]:
+        for url in js_urls[:25]:
             try:
-                jr = curl_req.get(js_url, timeout=15, **curl_kw)
-                text = jr.text or ""
-                if len(text) < 1000:
+                jr = curl_req.get(url, timeout=15, **curl_kw)
+                txt = jr.text or ""
+                if len(txt) < 1000:
                     continue
-                qid = _find_qid_in_text(text)
+                qid = _find_qid_in_text(txt)
                 if qid:
-                    fname = js_url.split("/")[-1][:35]
-                    return qid, f"found_in_{fname}"
-            except Exception as e:
-                debug.append(f"js_err:{str(e)[:25]}")
+                    return qid, f"in_{url.split('/')[-1][:30]}"
+            except Exception:
                 continue
-
-        debug.append("not_found_in_any_bundle")
+        debug.append("not_found")
     except Exception as e:
-        debug.append(f"page_err:{str(e)[:50]}")
+        debug.append(f"err:{str(e)[:50]}")
     return None, "; ".join(debug)
 
 
 async def initialize() -> None:
-    global _auth_token, _ct0
+    global _auth_token, _ct0, _live_qid
     _auth_token = os.getenv("TWITTER_AUTH_TOKEN", "").strip()
     _ct0 = os.getenv("TWITTER_CT0", "").strip()
-    asyncio.get_event_loop().run_in_executor(None, _warm)
+    # Manual override: set TWITTER_SEARCH_QID in Render env if auto-detect keeps failing
+    manual_qid = os.getenv("TWITTER_SEARCH_QID", "").strip()
+    if manual_qid:
+        _live_qid = manual_qid
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _warm)
 
 
 def _warm() -> None:
     global _live_qid
+    _init_client_transaction()
+    if _live_qid:
+        return
     with _qid_lock:
         if _live_qid:
             return
@@ -174,6 +202,10 @@ def _warm() -> None:
 def is_ready() -> bool:
     return bool(_auth_token and _ct0)
 
+
+# ─────────────────────────────────────────────────────────────────
+# response parsing
+# ─────────────────────────────────────────────────────────────────
 
 def _parse_graphql(data: dict) -> list[dict] | None:
     try:
@@ -192,19 +224,16 @@ def _parse_graphql(data: dict) -> list[dict] | None:
             raw_entries = inst.get("moduleItems", [])
         else:
             continue
-
         for entry in raw_entries:
             content = entry.get("content") or entry.get("item") or {}
             item_content = content.get("itemContent", {})
             if item_content.get("itemType") != "TimelineTweet":
                 continue
-
             result = item_content.get("tweet_results", {}).get("result", {})
             if not result:
                 continue
             if result.get("__typename") == "TweetWithVisibilityResults":
                 result = result.get("tweet", result)
-
             legacy = result.get("legacy", {})
             user_legacy = (
                 result.get("core", {})
@@ -214,7 +243,6 @@ def _parse_graphql(data: dict) -> list[dict] | None:
             )
             if not legacy:
                 continue
-
             tweets.append({
                 "id": legacy.get("id_str", ""),
                 "text": legacy.get("full_text") or legacy.get("text", ""),
@@ -223,11 +251,14 @@ def _parse_graphql(data: dict) -> list[dict] | None:
                 "likes": legacy.get("favorite_count", 0),
                 "retweets": legacy.get("retweet_count", 0),
             })
-
     return tweets if tweets else None
 
 
-_GRAPHQL_BASES = [
+# ─────────────────────────────────────────────────────────────────
+# search
+# ─────────────────────────────────────────────────────────────────
+
+_BASES = [
     "https://x.com/i/api/graphql",
     "https://twitter.com/i/api/graphql",
 ]
@@ -236,9 +267,7 @@ _GRAPHQL_BASES = [
 def _try_one(qid: str, base: str, headers: dict, cookies: dict,
              variables: str, with_features: bool = True) -> list[dict] | str:
     url = f"{base}/{qid}/SearchTimeline"
-    # Show enough of the URL to confirm the correct path is being used
-    short = url.replace("https://", "").replace("twitter.com", "tw.com")[:45]
-    tag = f"[{short}]"
+    short = url.replace("https://", "").replace("twitter.com", "tw.com")[:48]
     curl_kw = {"impersonate": "chrome120"} if _USE_CURL else {}
     params: dict = {"variables": variables}
     if with_features:
@@ -249,34 +278,35 @@ def _try_one(qid: str, base: str, headers: dict, cookies: dict,
                          params=params, timeout=15, **curl_kw)
         status = r.status_code
         if status == 404:
-            return f"{tag} 404"
+            return f"[{short}] 404"
         if status in (401, 403):
-            return f"{tag} 인증오류({status})"
+            return f"[{short}] 인증오류({status})"
         if status == 429:
             raise RuntimeError("Twitter 요청 한도 초과: 잠시 후 다시 시도해주세요.")
         if not r.content or not r.content.strip():
-            return f"{tag} 빈응답({status})"
+            return f"[{short}] 빈응답({status})"
         try:
             data = r.json()
         except ValueError:
-            return f"{tag} JSON오류({status}): {r.text[:60]}"
+            return f"[{short}] JSON오류({status}): {r.text[:60]}"
         if "errors" in data and data["errors"]:
             msgs = "; ".join(e.get("message", "?")[:40] for e in data["errors"][:2])
-            return f"{tag} API오류({status}): {msgs}"
+            return f"[{short}] API오류({status}): {msgs}"
         tweets = _parse_graphql(data)
         if tweets is not None:
             return tweets
         if "data" in data:
             return []
-        return f"{tag} 파싱실패({status}) keys={list(data.keys())[:4]}"
+        return f"[{short}] 파싱실패({status}) keys={list(data.keys())[:4]}"
     except RuntimeError:
         raise
     except Exception as e:
-        return f"{tag} 예외: {_redact(str(e))[:80]}"
+        return f"[{short}] 예외: {_redact(str(e))[:80]}"
 
 
 def _search_sync(keyword: str, count: int) -> list[dict]:
     global _live_qid
+    path_suffix = f"SearchTimeline"
 
     headers = {
         "Authorization": f"Bearer {_BEARER}",
@@ -285,7 +315,9 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         "x-twitter-auth-type": "OAuth2Session",
         "x-twitter-client-language": "ko",
         "x-client-uuid": _CLIENT_UUID,
-        "x-client-transaction-id": _rand_txn_id(),
+        "x-client-transaction-id": _get_txn_id(
+            "GET", f"/i/api/graphql/{_live_qid or 'unknown'}/{path_suffix}"
+        ),
         "Accept": "*/*",
         "Accept-Language": "ko-KR,ko;q=0.9",
         "Referer": "https://x.com/search",
@@ -299,9 +331,6 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         "product": "Latest",
     }, separators=(',', ':'))
 
-    errors: list[str] = []
-
-    # Build ordered qid list: live first, then fallbacks
     qids: list[str] = []
     if _live_qid:
         qids.append(_live_qid)
@@ -309,36 +338,48 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         if q not in qids:
             qids.append(q)
 
+    errors: list[str] = []
+    all_404 = True
     for qid in qids:
-        for base in _GRAPHQL_BASES:
+        # Update transaction ID for this specific qid/path
+        headers["x-client-transaction-id"] = _get_txn_id(
+            "GET", f"/i/api/graphql/{qid}/{path_suffix}"
+        )
+        for base in _BASES:
             res = _try_one(qid, base, headers, cookies, variables)
             if isinstance(res, list):
                 return res
             errors.append(res)
+            if "404" not in res:
+                all_404 = False
 
-    # All 404 → fresh fetch and retry
-    if all("404" in e for e in errors):
+    # All 404 → try fresh fetch
+    if all_404:
         fresh_qid, dbg = _fetch_live_qid()
         if fresh_qid and fresh_qid not in qids:
             with _qid_lock:
                 _live_qid = fresh_qid
-            errors.append(f"[fresh={fresh_qid[:8]}@{dbg}]")
-            for base in _GRAPHQL_BASES:
-                # Try with features
+            errors.append(f"[fresh:{fresh_qid[:8]}@{dbg}]")
+            headers["x-client-transaction-id"] = _get_txn_id(
+                "GET", f"/i/api/graphql/{fresh_qid}/{path_suffix}"
+            )
+            for base in _BASES:
                 res = _try_one(fresh_qid, base, headers, cookies, variables)
                 if isinstance(res, list):
                     return res
                 errors.append(res)
-                # Try without features (in case feature flags have changed)
                 res2 = _try_one(fresh_qid, base, headers, cookies, variables, with_features=False)
                 if isinstance(res2, list):
                     return res2
                 errors.append(f"no-feat:{res2}")
         else:
-            errors.append(f"[fresh_same_or_fail: {dbg}]")
+            errors.append(f"[fresh_same:{dbg}]")
 
-    curl_info = f"curl={'on' if _USE_CURL else 'off'}"
-    raise RuntimeError(f"Twitter 검색 실패 ({curl_info}): " + " / ".join(errors))
+    ct_info = f"CT={_ct_init_err or 'not_init'}"
+    raise RuntimeError(
+        f"Twitter 검색 실패 (curl={'on' if _USE_CURL else 'off'},{ct_info}): "
+        + " / ".join(errors)
+    )
 
 
 async def search_tweets(keyword: str, count: int = 30) -> list[dict]:

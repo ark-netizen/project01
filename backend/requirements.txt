@@ -11,6 +11,8 @@ youtube-search-python
 requests<3
 # Chrome TLS/HTTP2 핑거프린트 모방 (Twitter/X 크롤링용)
 curl_cffi>=0.6.2
+# x-client-transaction-id 생성 알고리즘 (SearchTimeline 인증)
+twikit>=2.0.0
 
 # YouTube 날짜 파싱
 dateparser
