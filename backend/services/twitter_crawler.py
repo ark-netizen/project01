@@ -16,15 +16,29 @@ def _redact(msg: str) -> str:
 def _patch_twikit():
     """Render 서버 IP에서 Twitter JS 파싱 실패(KEY_BYTE) 우회 — ClientTransaction 완전 대체"""
     class _NoOpTransaction:
+        # 알려진 속성 명시적 정의
         key = None
+        home_page_response = None
         key_bytes_indices = []
+        ondemand_data = None
 
         def __init__(self, *args, **kwargs):
             self.key = None
+            self.home_page_response = None
             self.key_bytes_indices = []
+
+        def __getattr__(self, name):
+            # 정의되지 않은 모든 속성 → None 반환
+            return None
 
         async def get_transaction_id(self, *args, **kwargs):
             return ""
+
+        async def _get_key_bytes(self, *args, **kwargs):
+            return None
+
+        async def _get_home_page_response(self, *args, **kwargs):
+            return None
 
     try:
         import twikit.client_transaction as ct
