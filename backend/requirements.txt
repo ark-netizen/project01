@@ -3,7 +3,7 @@ uvicorn[standard]
 python-dotenv
 
 # Twitter 비공식 크롤링
-twikit
+twikit>=2.3
 
 # YouTube 댓글 크롤링 (API키 불필요)
 youtube-comment-downloader
