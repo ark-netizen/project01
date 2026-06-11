@@ -20,7 +20,6 @@ _BEARER = (
     "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 )
 
-# Fallback query IDs (may be outdated — live fetch is preferred)
 _FALLBACK_QIDS = [
     "nK1dw4oV3k4w5TdtcAdSww",
     "gkjsKepM6gl_HmFWoWKfgg",
@@ -52,8 +51,8 @@ _FEATURES = json.dumps({
 
 _FIELD_TOGGLES = json.dumps({"withArticleRichContentState": False}, separators=(',', ':'))
 
-_live_qid: str | None = None
-_live_qid_debug: str = ""
+# (queryId, graphql_base_url)
+_live: tuple[str, str] | None = None
 _qid_lock = threading.Lock()
 
 
@@ -64,27 +63,55 @@ def _redact(msg: str) -> str:
     return msg
 
 
-def _find_search_qid(text: str) -> str | None:
-    """Find SearchTimeline query ID from JS/HTML text."""
-    # Most reliable: the full constructed URL appears in the JS
-    for m in re.finditer(r'/graphql/([A-Za-z0-9_-]{15,})/SearchTimeline', text):
-        return m.group(1)
+# ------------------------------------------------------------------
+# Query-ID detection: finds the SearchTimeline queryId AND base URL
+# from x.com JS bundles.
+#
+# Bug in previous version: reverse regex (operationName→queryId)
+# spanned object boundaries in minified JS and matched the NEXT
+# operation's queryId.  Now only forward (queryId→operationName).
+# ------------------------------------------------------------------
 
-    # queryId value immediately adjacent to operationName:"SearchTimeline"
+def _find_in_text(text: str) -> tuple[str, str] | None:
+    """
+    Returns (queryId, graphql_base_url) or None.
+    graphql_base_url example: "https://x.com/i/api/graphql"
+    """
+    # ── Pattern 1: full HTTPS URL (most reliable, exact base captured)
+    m = re.search(
+        r'(https://[a-z0-9.-]+(?:/i/api)?/graphql)/([A-Za-z0-9_-]{15,})/SearchTimeline',
+        text,
+    )
+    if m:
+        return m.group(2), m.group(1)   # (qid, base)
+
+    # ── Pattern 2: absolute path only  /i/api/graphql/QID/SearchTimeline
+    #              or                   /graphql/QID/SearchTimeline
+    m = re.search(
+        r'((?:/i/api)?/graphql)/([A-Za-z0-9_-]{15,})/SearchTimeline',
+        text,
+    )
+    if m:
+        path_prefix = m.group(1)        # "/i/api/graphql" or "/graphql"
+        qid = m.group(2)
+        base = "https://x.com" + path_prefix
+        return qid, base
+
+    # ── Pattern 3: queryId BEFORE operationName  (forward only — no reverse)
+    #   Reverse pattern was matching the NEXT operation's ID in minified JS.
     for pat in (
-        r'"queryId"\s*:\s*"([A-Za-z0-9_-]{15,})"[^}]{0,500}"operationName"\s*:\s*"SearchTimeline"',
-        r'"operationName"\s*:\s*"SearchTimeline"[^}]{0,500}"queryId"\s*:\s*"([A-Za-z0-9_-]{15,})"',
-        r'queryId:"([A-Za-z0-9_-]{15,})"[^}]{0,500}operationName:"SearchTimeline"',
-        r'operationName:"SearchTimeline"[^}]{0,500}queryId:"([A-Za-z0-9_-]{15,})"',
+        r'queryId:"([A-Za-z0-9_-]{15,})"[^}]{0,200}operationName:"SearchTimeline"',
+        r'"queryId":"([A-Za-z0-9_-]{15,})"[^}]{0,200}"operationName":"SearchTimeline"',
     ):
         m = re.search(pat, text)
         if m:
-            return m.group(1)
+            return m.group(1), "https://x.com/i/api/graphql"
+
     return None
 
 
-def _fetch_live_query_id() -> tuple[str | None, str]:
-    """Returns (queryId, debug_info). Fetches from x.com JS bundles."""
+def _fetch_live() -> tuple[tuple[str, str] | None, str]:
+    """Returns ((queryId, base_url), debug_info)."""
     if not _USE_CURL:
         return None, "curl_cffi not available"
     curl_kw = {"impersonate": "chrome120"}
@@ -97,18 +124,15 @@ def _fetch_live_query_id() -> tuple[str | None, str]:
             timeout=20, **curl_kw,
         )
         html = page.text or ""
-        debug.append(f"html={len(html)}chars")
+        debug.append(f"html={len(html)}")
 
-        # Check directly in HTML first
-        qid = _find_search_qid(html)
-        if qid:
-            return qid, f"found in HTML"
+        result = _find_in_text(html)
+        if result:
+            return result, f"found in HTML"
 
-        # Collect JS bundle URLs
         js_urls: list[str] = list(dict.fromkeys(
             re.findall(r'https://abs\.twimg\.com/responsive-web/client-web/[^\s"\'<>]+\.js', html)
         ))
-        # Prefer bundles likely to have API code
         js_urls.sort(key=lambda u: (0 if any(k in u for k in ("main", "api", "bundle")) else 1))
         debug.append(f"bundles={len(js_urls)}")
 
@@ -118,17 +142,17 @@ def _fetch_live_query_id() -> tuple[str | None, str]:
                 text = jr.text or ""
                 if len(text) < 1000:
                     continue
-                qid = _find_search_qid(text)
-                if qid:
-                    fname = js_url.split("/")[-1][:30]
-                    return qid, f"found in {fname}"
+                result = _find_in_text(text)
+                if result:
+                    fname = js_url.split("/")[-1][:35]
+                    return result, f"found in {fname}"
             except Exception as e:
-                debug.append(f"js_err:{str(e)[:30]}")
+                debug.append(f"jserr:{str(e)[:30]}")
                 continue
 
         debug.append("not found in any bundle")
     except Exception as e:
-        debug.append(f"page_err:{str(e)[:60]}")
+        debug.append(f"err:{str(e)[:60]}")
     return None, "; ".join(debug)
 
 
@@ -136,18 +160,17 @@ async def initialize() -> None:
     global _auth_token, _ct0
     _auth_token = os.getenv("TWITTER_AUTH_TOKEN", "").strip()
     _ct0 = os.getenv("TWITTER_CT0", "").strip()
-    asyncio.get_event_loop().run_in_executor(None, _warm_query_id)
+    asyncio.get_event_loop().run_in_executor(None, _warm)
 
 
-def _warm_query_id() -> None:
-    global _live_qid, _live_qid_debug
+def _warm() -> None:
+    global _live
     with _qid_lock:
-        if _live_qid:
+        if _live:
             return
-        qid, dbg = _fetch_live_query_id()
-        _live_qid_debug = dbg
-        if qid:
-            _live_qid = qid
+        result, _ = _fetch_live()
+        if result:
+            _live = result
 
 
 def is_ready() -> bool:
@@ -206,19 +229,21 @@ def _parse_graphql(data: dict) -> list[dict] | None:
     return tweets if tweets else None
 
 
-def _try_qid(qid: str, base: str, headers: dict, cookies: dict, variables: str) -> list[dict] | str:
-    url = f"{base}/i/api/graphql/{qid}/SearchTimeline"
-    tag = f"[{base.split('/')[2][:5]}:{qid[:8]}]"
+def _try_one(qid: str, base_url: str, headers: dict, cookies: dict,
+             variables: str, features: str | None = _FEATURES) -> list[dict] | str:
+    url = f"{base_url}/{qid}/SearchTimeline"
+    tag = f"[{qid[:8]}@{base_url.split('/')[2][:8]}]"
     curl_kw = {"impersonate": "chrome120"} if _USE_CURL else {}
     try:
-        r = curl_req.get(
-            url, headers=headers, cookies=cookies,
-            params={"variables": variables, "features": _FEATURES, "fieldToggles": _FIELD_TOGGLES},
-            timeout=15, **curl_kw,
-        )
+        params: dict = {"variables": variables}
+        if features is not None:
+            params["features"] = features
+            params["fieldToggles"] = _FIELD_TOGGLES
+        r = curl_req.get(url, headers=headers, cookies=cookies,
+                         params=params, timeout=15, **curl_kw)
         status = r.status_code
         if status == 404:
-            return f"{tag} qid만료(404)"
+            return f"{tag} 404"
         if status in (401, 403):
             return f"{tag} 인증오류({status})"
         if status == 429:
@@ -229,11 +254,9 @@ def _try_qid(qid: str, base: str, headers: dict, cookies: dict, variables: str) 
             data = r.json()
         except ValueError:
             return f"{tag} JSON오류({status}): {r.text[:60]}"
-
         if "errors" in data and data["errors"]:
             msgs = "; ".join(e.get("message", "?")[:40] for e in data["errors"][:2])
             return f"{tag} API오류: {msgs}"
-
         tweets = _parse_graphql(data)
         if tweets is not None:
             return tweets
@@ -247,7 +270,7 @@ def _try_qid(qid: str, base: str, headers: dict, cookies: dict, variables: str) 
 
 
 def _search_sync(keyword: str, count: int) -> list[dict]:
-    global _live_qid, _live_qid_debug
+    global _live
 
     headers = {
         "Authorization": f"Bearer {_BEARER}",
@@ -268,38 +291,52 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         "product": "Latest",
     }, separators=(',', ':'))
 
-    qids = []
-    if _live_qid:
-        qids.append(_live_qid)
-    for q in _FALLBACK_QIDS:
-        if q not in qids:
-            qids.append(q)
+    errors: list[str] = []
 
-    errors = []
-    all_404 = True
-    for qid in qids:
-        for base in ("https://x.com", "https://twitter.com"):
-            res = _try_qid(qid, base, headers, cookies, variables)
+    # 1. Try live qid with its detected base URL
+    if _live:
+        qid, base = _live
+        res = _try_one(qid, base, headers, cookies, variables)
+        if isinstance(res, list):
+            return res
+        errors.append(res)
+        # Also try with the other domain
+        alt = base.replace("x.com", "twitter.com") if "x.com" in base else base.replace("twitter.com", "x.com")
+        if alt != base:
+            res2 = _try_one(qid, alt, headers, cookies, variables)
+            if isinstance(res2, list):
+                return res2
+            errors.append(res2)
+
+    # 2. Try fallback qids on standard bases
+    for qid in _FALLBACK_QIDS:
+        if _live and qid == _live[0]:
+            continue
+        for base in ("https://x.com/i/api/graphql", "https://twitter.com/i/api/graphql"):
+            res = _try_one(qid, base, headers, cookies, variables)
             if isinstance(res, list):
                 return res
             errors.append(res)
-            if "qid만료(404)" not in res:
-                all_404 = False
 
-    # All 404 — try fresh live fetch
-    if all_404:
-        fresh, dbg = _fetch_live_query_id()
-        _live_qid_debug = dbg
-        if fresh and fresh not in qids:
+    # 3. All 404 — fetch fresh and retry
+    if all("404" in e for e in errors):
+        fresh, dbg = _fetch_live()
+        if fresh and fresh != _live:
             with _qid_lock:
-                _live_qid = fresh
-            for base in ("https://x.com", "https://twitter.com"):
-                res = _try_qid(fresh, base, headers, cookies, variables)
-                if isinstance(res, list):
-                    return res
-                errors.append(f"[fresh:{fresh[:8]}] {res}")
+                _live = fresh
+            qid, base = fresh
+            errors.append(f"fresh={qid[:8]}@{dbg}")
+            res = _try_one(qid, base, headers, cookies, variables)
+            if isinstance(res, list):
+                return res
+            errors.append(res)
+            # Also try without features (in case features flags are outdated)
+            res2 = _try_one(qid, base, headers, cookies, variables, features=None)
+            if isinstance(res2, list):
+                return res2
+            errors.append(f"no-features:{res2}")
         else:
-            errors.append(f"live_fetch={dbg}")
+            errors.append(f"fetch_fail={dbg}")
 
     curl_info = f"curl={'on' if _USE_CURL else 'off'}"
     raise RuntimeError(f"Twitter 검색 실패 ({curl_info}): " + " / ".join(errors))
