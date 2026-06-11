@@ -63,9 +63,11 @@ async def twitter_search(
 
     items = [{**tweet, "sentiment": sentiment} for tweet, sentiment in zip(tweets, sentiments)]
 
+    errors = [s for s in sentiments if s.get("error")]
     return {
         "keyword": keyword,
         "items": items,
         "summary": summarize(sentiments, tweets),
         "keywords": extract_keywords([t["text"] for t in tweets]),
+        "sentiment_error": errors[0]["error"] if errors and len(errors) == len(sentiments) else None,
     }

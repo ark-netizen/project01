@@ -16,6 +16,8 @@ export default function TwitterSearch() {
   const [since, setSince] = useState('')
   const [until, setUntil] = useState('')
   const [loading, setLoading] = useState(false)
+  const [loadingStep, setLoadingStep] = useState('')
+  const [loadingStepIdx, setLoadingStepIdx] = useState(0)
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
 
@@ -59,20 +61,32 @@ export default function TwitterSearch() {
     setLoading(true)
     setError('')
     setResult(null)
+
+    const steps = ['트윗 수집 중...', '감성 분석 중...', '키워드 추출 중...']
+    let idx = 0
+    setLoadingStep(steps[0])
+    setLoadingStepIdx(0)
+    const timer = setInterval(() => {
+      idx = Math.min(idx + 1, steps.length - 1)
+      setLoadingStep(steps[idx])
+      setLoadingStepIdx(idx)
+    }, 4000)
+
     try {
       const params = new URLSearchParams({
-        keyword,
-        count,
+        keyword, count,
         ...(since && { since }),
         ...(until && { until }),
       })
       const res = await fetch(api(`/api/twitter/search?${params}`))
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || '오류 발생')
+      if (data.sentiment_error) setError(`감성분석 오류: ${data.sentiment_error}`)
       setResult(data)
     } catch (err) {
       setError(err.message)
     } finally {
+      clearInterval(timer)
       setLoading(false)
     }
   }
@@ -188,7 +202,21 @@ export default function TwitterSearch() {
         <div className="bg-red-50 border border-red-200 text-red-600 rounded-xl px-5 py-4 text-sm">{error}</div>
       )}
       {loading && (
-        <div className="text-center py-12 text-gray-400 text-sm">트윗 크롤링 및 감성분석 중입니다...</div>
+        <div className="bg-white rounded-2xl shadow p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <svg className="animate-spin h-5 w-5 text-blue-500" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+            </svg>
+            <span className="text-sm font-medium text-gray-700">{loadingStep}</span>
+          </div>
+          <div className="flex gap-1">
+            {['트윗 수집', '감성 분석', '키워드 추출'].map((s, i) => (
+              <div key={s} className={`h-1.5 flex-1 rounded-full transition-all duration-500
+                ${loadingStepIdx > i ? 'bg-blue-500' : loadingStepIdx === i ? 'bg-blue-300 animate-pulse' : 'bg-gray-200'}`} />
+            ))}
+          </div>
+        </div>
       )}
       {result && (
         <>

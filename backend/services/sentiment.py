@@ -63,7 +63,10 @@ def analyze_batch(texts: list[str]) -> list[dict]:
 
         try:
             raw = _call_hf(list(inputs))
-        except Exception:
+        except Exception as e:
+            err_msg = str(e)
+            for idx in indices:
+                results[idx] = {"label": "neutral", "label_ko": "중립", "score": 0.0, "error": err_msg}
             continue
 
         # 단일 입력이면 list[dict], 복수면 list[list[dict]]
