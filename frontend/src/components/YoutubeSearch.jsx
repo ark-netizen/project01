@@ -265,9 +265,17 @@ export default function YoutubeSearch() {
               </div>
             </div>
           )}
-          <SentimentChart summary={result.summary} />
-          <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
-          <TopAccounts accounts={result.summary?.top_accounts} type="youtube" />
+          <div className="flex gap-5 items-start">
+            <div className="flex-1 flex flex-col gap-5 min-w-0">
+              <SentimentChart summary={result.summary} />
+              <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
+            </div>
+            {result.summary?.top_accounts?.length > 0 && (
+              <div className="w-52 shrink-0">
+                <TopAccounts accounts={result.summary.top_accounts} type="youtube" vertical />
+              </div>
+            )}
+          </div>
           <ItemList items={result.items} type="youtube" filterKeyword={selectedKeyword} />
         </>
       )}
