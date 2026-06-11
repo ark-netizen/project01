@@ -43,6 +43,7 @@ ENGLISH_STOPWORDS = {
 STOPWORDS = KOREAN_STOPWORDS | ENGLISH_STOPWORDS
 
 HAS_KOREAN = re.compile(r'[가-힣ㄱ-ㅎㅏ-ㅣ]')
+JAMO_ONLY = re.compile(r'^[ㄱ-ㅎㅏ-ㅣ]+$')  # ㅋㅋ, ㅎㅎ, ㅠㅠ 등 자모 감탄사 전체
 
 
 def _has_korean(word: str) -> bool:
@@ -65,6 +66,9 @@ def extract_keywords(texts: list[str], top_n: int = 20) -> list[dict]:
             if word.isdigit():
                 continue
             if word in STOPWORDS:
+                continue
+            # ㅋㅋ, ㅎㅎ, ㅠㅠ, ㄷㄷ 등 자모만으로 된 감탄사 제외
+            if JAMO_ONLY.match(word):
                 continue
             # 영어 단어는 5글자 미만이면 제외 (한국어는 제외 안 함)
             if not _has_korean(word) and len(word) < 5:

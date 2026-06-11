@@ -259,9 +259,12 @@ export default function YoutubeSearch() {
               <div className="flex flex-col gap-1">
                 {result.videos.map(v => (
                   <a key={v.id} href={v.url} target="_blank" rel="noopener noreferrer"
-                    className="flex items-center justify-between text-sm hover:bg-gray-50 rounded-lg px-3 py-2 transition">
+                    className="flex items-center justify-between text-sm hover:bg-gray-50 rounded-lg px-3 py-2 transition gap-3">
                     <span className="text-gray-800 truncate flex-1">{v.title}</span>
-                    <span className="text-gray-400 shrink-0 ml-4 text-xs">{v.channel}</span>
+                    <span className="text-gray-400 shrink-0 text-xs hidden sm:inline">{v.channel}</span>
+                    {v.views && <span className="text-gray-400 shrink-0 text-xs">👁 {v.views}</span>}
+                    {v.duration && <span className="text-gray-400 shrink-0 text-xs">{v.duration}</span>}
+                    {v.published && <span className="text-gray-400 shrink-0 text-xs hidden md:inline">{v.published}</span>}
                   </a>
                 ))}
               </div>

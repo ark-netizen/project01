@@ -27,6 +27,25 @@ async def startup():
     await initialize()
 
 
+@app.post("/api/translate")
+def translate_text(body: dict):
+    import requests as req
+    text = str(body.get("text", ""))[:500]
+    if not text:
+        return {"translated": ""}
+    try:
+        r = req.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": text, "langpair": "auto|ko"},
+            timeout=8,
+        )
+        data = r.json()
+        translated = data.get("responseData", {}).get("translatedText", text)
+        return {"translated": translated}
+    except Exception:
+        return {"translated": text, "error": "번역 실패"}
+
+
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "ok"}

@@ -75,6 +75,9 @@ async def _run_keyword_analysis(job_id: str, keyword: str, max_videos: int,
                 "title": v.get("title", ""),
                 "channel": v.get("channel", {}).get("name", ""),
                 "url": f"https://www.youtube.com/watch?v={v.get('id','')}",
+                "views": (v.get("viewCount") or {}).get("short") or (v.get("viewCount") or {}).get("text", ""),
+                "duration": v.get("duration", ""),
+                "published": v.get("publishedTime", ""),
             }
             for v in videos if v.get("id")
         ]
