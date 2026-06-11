@@ -11,23 +11,11 @@ _BEARER = (
     "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 )
 
-# 시도할 엔드포인트 목록 (순서대로 시도)
 _ENDPOINTS = [
-    ("https://twitter.com/i/api/1.1/search/tweets.json", {
-        "tweet_mode": "extended",
-        "include_entities": "true",
-        "result_type": "recent",
-    }),
-    ("https://twitter.com/i/api/1.1/search/tweets.json", {
-        "tweet_mode": "extended",
-        "include_entities": "true",
-        "result_type": "mixed",
-    }),
-    ("https://twitter.com/i/api/2/search/adaptive.json", {
-        "tweet_mode": "extended",
-        "include_entities": "true",
-        "query_source": "typed_query",
-    }),
+    "https://x.com/i/api/1.1/search/tweets.json",
+    "https://twitter.com/i/api/1.1/search/tweets.json",
+    "https://x.com/i/api/2/search/adaptive.json",
+    "https://twitter.com/i/api/2/search/adaptive.json",
 ]
 
 
@@ -49,7 +37,10 @@ def is_ready() -> bool:
 
 
 def _parse_response(data: dict) -> list[dict] | None:
-    # 포맷 1: 1.1 statuses 배열
+    if "errors" in data and data["errors"]:
+        err = data["errors"][0]
+        raise RuntimeError(f"Twitter API 오류({err.get('code','?')}): {err.get('message','unknown')}")
+
     if "statuses" in data:
         tweets = []
         for tw in data["statuses"]:
@@ -64,7 +55,6 @@ def _parse_response(data: dict) -> list[dict] | None:
             })
         return tweets
 
-    # 포맷 2: adaptive.json globalObjects
     if "globalObjects" in data:
         tweet_objs = data["globalObjects"].get("tweets", {})
         user_objs = data["globalObjects"].get("users", {})
@@ -86,7 +76,7 @@ def _parse_response(data: dict) -> list[dict] | None:
 
 
 def _search_sync(keyword: str, count: int) -> list[dict]:
-    headers = {
+    base_headers = {
         "Authorization": f"Bearer {_BEARER}",
         "x-csrf-token": _ct0,
         "x-twitter-active-user": "yes",
@@ -99,38 +89,56 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         ),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "ko-KR,ko;q=0.9",
-        "Referer": "https://twitter.com/search",
-        "Origin": "https://twitter.com",
+        "Referer": "https://x.com/search",
+        "Origin": "https://x.com",
     }
-    cookies = {"auth_token": _auth_token, "ct0": _ct0}
-    last_error = "알 수 없는 오류"
+    cookies = {
+        "auth_token": _auth_token,
+        "ct0": _ct0,
+    }
+    params = {
+        "q": keyword,
+        "count": count,
+        "tweet_mode": "extended",
+        "include_entities": "true",
+        "result_type": "recent",
+        "query_source": "typed_query",
+        "spelling_corrections": "1",
+    }
 
-    for url, extra_params in _ENDPOINTS:
-        params = {"q": keyword, "count": count, **extra_params}
+    errors = []
+    for url in _ENDPOINTS:
         try:
-            r = req.get(url, headers=headers, cookies=cookies, params=params, timeout=15)
+            r = req.get(url, headers=base_headers, cookies=cookies,
+                        params=params, timeout=15, allow_redirects=True)
+
             if r.status_code in (401, 403):
-                raise RuntimeError("Twitter 인증 오류: 쿠키가 만료됐거나 잘못됐습니다.")
+                errors.append(f"[{url.split('/')[2]}] 인증오류({r.status_code})")
+                continue
             if r.status_code == 429:
                 raise RuntimeError("Twitter 요청 한도 초과: 잠시 후 다시 시도해주세요.")
-            if not r.content:
-                last_error = f"{url} 응답 비어있음"
+            if not r.content or not r.content.strip():
+                errors.append(f"[{url.split('/')[2]}] 빈응답")
                 continue
             try:
                 data = r.json()
             except ValueError:
-                last_error = f"{url} JSON 파싱 실패: {r.text[:100]}"
+                errors.append(f"[{url.split('/')[2]}] JSON오류({r.status_code}): {r.text[:80]}")
                 continue
-            tweets = _parse_response(data)
+            try:
+                tweets = _parse_response(data)
+            except RuntimeError as e:
+                errors.append(f"[{url.split('/')[2]}] {e}")
+                continue
             if tweets is not None:
                 return tweets
-            last_error = f"{url} 알 수 없는 응답 형식: {list(data.keys())}"
+            errors.append(f"[{url.split('/')[2]}] 알수없는형식:{list(data.keys())[:3]}")
         except RuntimeError:
             raise
         except Exception as e:
-            last_error = _redact(str(e))
+            errors.append(f"[{url.split('/')[2]}] 예외:{_redact(str(e))[:60]}")
 
-    raise RuntimeError(f"Twitter 검색 실패: {last_error}")
+    raise RuntimeError("Twitter 검색 실패: " + " / ".join(errors))
 
 
 async def search_tweets(keyword: str, count: int = 30) -> list[dict]:
