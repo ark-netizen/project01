@@ -2,9 +2,10 @@ import re
 import os
 import httpx
 
+# 소셜미디어 다국어(한국어 포함) 감성분석 모델
 HF_API_URL = (
     "https://api-inference.huggingface.co/models/"
-    "lxyuan/distilbert-base-multilingual-cased-sentiments-student"
+    "cardiffnlp/twitter-xlm-roberta-base-sentiment"
 )
 
 LABEL_MAP = {
@@ -21,7 +22,7 @@ def clean_text(text: str) -> str:
     return text.strip()[:512]
 
 
-def _call_hf(texts: list[str]) -> list[dict]:
+def _call_hf(texts: list[str]) -> list:
     token = os.getenv("HF_TOKEN", "")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
@@ -33,30 +34,33 @@ def _call_hf(texts: list[str]) -> list[dict]:
                 json={"inputs": texts, "options": {"wait_for_model": True}},
             )
             if resp.status_code == 200:
-                return resp.json()
-            # 모델 로딩 중 (503) → 대기 후 재시도
+                data = resp.json()
+                # 오류 응답 감지
+                if isinstance(data, dict) and "error" in data:
+                    raise RuntimeError(f"HF 응답 오류: {data['error']}")
+                return data
             if resp.status_code == 503:
                 import time
-                wait = resp.json().get("estimated_time", 20)
+                try:
+                    wait = resp.json().get("estimated_time", 20)
+                except Exception:
+                    wait = 20
                 time.sleep(min(wait, 30))
                 continue
-            raise RuntimeError(f"HuggingFace API 오류 {resp.status_code}: {resp.text[:200]}")
+            raise RuntimeError(f"HuggingFace API 오류 {resp.status_code}: {resp.text[:300]}")
 
-    raise RuntimeError("HuggingFace API 재시도 초과")
+    raise RuntimeError("HuggingFace API 재시도 3회 초과")
 
 
 def analyze_batch(texts: list[str]) -> list[dict]:
     cleaned = [clean_text(t) for t in texts]
-
-    # 빈 텍스트 인덱스 처리
     valid = [(i, t) for i, t in enumerate(cleaned) if t]
-    results = [{"label": "neutral", "label_ko": "중립", "score": 1.0}] * len(texts)
+    results = [{"label": "neutral", "label_ko": "중립", "score": 1.0} for _ in texts]
 
     if not valid:
         return results
 
-    # HF API는 한 번에 100건 제한 → 50건씩 배치
-    BATCH = 50
+    BATCH = 32  # xlm-roberta는 더 작은 배치가 안전
     for start in range(0, len(valid), BATCH):
         chunk = valid[start:start + BATCH]
         indices, inputs = zip(*chunk)
@@ -69,17 +73,21 @@ def analyze_batch(texts: list[str]) -> list[dict]:
                 results[idx] = {"label": "neutral", "label_ko": "중립", "score": 0.0, "error": err_msg}
             continue
 
-        # 단일 입력이면 list[dict], 복수면 list[list[dict]]
-        if isinstance(raw[0], dict):
+        # 단일 입력 → list[dict], 복수 입력 → list[list[dict]]
+        if raw and isinstance(raw[0], dict):
             raw = [raw]
 
         for idx, scores in zip(indices, raw):
-            best = max(scores, key=lambda x: x["score"])
-            results[idx] = {
-                "label": best["label"],
-                "label_ko": LABEL_MAP.get(best["label"], best["label"]),
-                "score": round(best["score"], 4),
-            }
+            try:
+                best = max(scores, key=lambda x: x["score"])
+                label = best["label"].lower()
+                results[idx] = {
+                    "label": label,
+                    "label_ko": LABEL_MAP.get(label, label),
+                    "score": round(best["score"], 4),
+                }
+            except Exception as e:
+                results[idx] = {"label": "neutral", "label_ko": "중립", "score": 0.0, "error": str(e)}
 
     return results
 
