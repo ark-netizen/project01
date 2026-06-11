@@ -10,6 +10,13 @@ frontend/node_modules/
 frontend/dist/
 frontend/.env.production
 
+# 환경변수 파일 (토큰, 비밀키 - 절대 커밋 금지)
+.env
+.env.local
+backend/.env
+frontend/.env
+
 # 기타
 .DS_Store
 Thumbs.db
+dev-notes/
