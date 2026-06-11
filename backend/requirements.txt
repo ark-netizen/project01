@@ -8,11 +8,10 @@ twikit
 # YouTube 댓글 크롤링 (API키 불필요)
 youtube-comment-downloader
 
-# 감성분석
-transformers
-torch
-langdetect
-
-# 유틸
+# HuggingFace Inference API 호출
 httpx
+
+# YouTube 날짜 파싱
+dateparser
+
 pydantic
