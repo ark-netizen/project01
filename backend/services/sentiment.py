@@ -1,6 +1,8 @@
 import re
 import os
+import time
 import requests as _requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # HuggingFace 2024 신규 라우터 엔드포인트
 HF_API_URL = (
@@ -22,8 +24,8 @@ def clean_text(text: str) -> str:
     return text.strip()[:512]
 
 
-def _call_hf(texts: list[str]) -> list:
-    import time
+def _call_one(text: str) -> list:
+    """텍스트 하나를 HF API에 전송하고 scores 리스트 반환"""
     token = os.getenv("HF_TOKEN", "")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
@@ -32,19 +34,20 @@ def _call_hf(texts: list[str]) -> list:
             resp = _requests.post(
                 HF_API_URL,
                 headers=headers,
-                json={"inputs": texts, "options": {"wait_for_model": True}},
-                timeout=120,
+                json={"inputs": text, "options": {"wait_for_model": True}},
+                timeout=60,
             )
         except Exception as e:
             if attempt < 2:
-                time.sleep(5)
+                time.sleep(3)
                 continue
-            raise RuntimeError(f"HuggingFace 연결 실패: {e}")
+            raise RuntimeError(f"연결 실패: {e}")
 
         if resp.status_code == 200:
             data = resp.json()
-            if isinstance(data, dict) and "error" in data:
-                raise RuntimeError(f"HF 응답 오류: {data['error']}")
+            # [[...]] 형태로 감싸진 경우 풀기
+            if data and isinstance(data[0], list):
+                return data[0]
             return data
         if resp.status_code == 503:
             try:
@@ -53,38 +56,28 @@ def _call_hf(texts: list[str]) -> list:
                 wait = 20
             time.sleep(min(wait, 30))
             continue
-        raise RuntimeError(f"HuggingFace API 오류 {resp.status_code}: {resp.text[:300]}")
+        raise RuntimeError(f"HF API 오류 {resp.status_code}: {resp.text[:200]}")
 
-    raise RuntimeError("HuggingFace API 재시도 3회 초과")
+    raise RuntimeError("재시도 3회 초과")
 
 
 def analyze_batch(texts: list[str]) -> list[dict]:
     cleaned = [clean_text(t) for t in texts]
-    valid = [(i, t) for i, t in enumerate(cleaned) if t]
     results = [{"label": "neutral", "label_ko": "중립", "score": 1.0} for _ in texts]
 
+    valid = [(i, t) for i, t in enumerate(cleaned) if t]
     if not valid:
         return results
 
-    BATCH = 32  # xlm-roberta는 더 작은 배치가 안전
-    for start in range(0, len(valid), BATCH):
-        chunk = valid[start:start + BATCH]
-        indices, inputs = zip(*chunk)
-
-        try:
-            raw = _call_hf(list(inputs))
-        except Exception as e:
-            err_msg = str(e)
-            for idx in indices:
-                results[idx] = {"label": "neutral", "label_ko": "중립", "score": 0.0, "error": err_msg}
-            continue
-
-        # 단일 입력 → list[dict], 복수 입력 → list[list[dict]]
-        if raw and isinstance(raw[0], dict):
-            raw = [raw]
-
-        for idx, scores in zip(indices, raw):
+    # 5개씩 병렬 호출 (rate limit 고려)
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_map = {executor.submit(_call_one, text): idx for idx, text in valid}
+        for future in as_completed(future_map):
+            idx = future_map[future]
             try:
+                scores = future.result()
+                if not scores:
+                    continue
                 best = max(scores, key=lambda x: x["score"])
                 label = best["label"].lower()
                 results[idx] = {
@@ -93,7 +86,12 @@ def analyze_batch(texts: list[str]) -> list[dict]:
                     "score": round(best["score"], 4),
                 }
             except Exception as e:
-                results[idx] = {"label": "neutral", "label_ko": "중립", "score": 0.0, "error": str(e)}
+                results[idx] = {
+                    "label": "neutral",
+                    "label_ko": "중립",
+                    "score": 0.0,
+                    "error": str(e),
+                }
 
     return results
 
