@@ -8,6 +8,7 @@ backend/**/*.pyc
 # Node
 frontend/node_modules/
 frontend/dist/
+frontend/.env.production
 
 # 기타
 .DS_Store

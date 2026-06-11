@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { api } from '../api'
 import SentimentChart from './SentimentChart'
 import TopAccounts from './TopAccounts'
 import ItemList from './ItemList'
@@ -11,12 +12,14 @@ export default function TwitterSearch() {
 
   const [keyword, setKeyword] = useState('')
   const [count, setCount] = useState(50)
+  const [since, setSince] = useState('')
+  const [until, setUntil] = useState('')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    fetch('/api/twitter/status')
+    fetch(api('/api/twitter/status'))
       .then(r => r.json())
       .then(d => setLoggedIn(d.logged_in))
       .catch(() => {})
@@ -27,7 +30,7 @@ export default function TwitterSearch() {
     setLoginLoading(true)
     setLoginError('')
     try {
-      const res = await fetch('/api/twitter/login', {
+      const res = await fetch(api('/api/twitter/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(loginForm),
@@ -44,7 +47,7 @@ export default function TwitterSearch() {
   }
 
   async function handleLogout() {
-    await fetch('/api/twitter/logout', { method: 'POST' })
+    await fetch(api('/api/twitter/logout'), { method: 'POST' })
     setLoggedIn(false)
     setResult(null)
   }
@@ -56,7 +59,13 @@ export default function TwitterSearch() {
     setError('')
     setResult(null)
     try {
-      const res = await fetch(`/api/twitter/search?keyword=${encodeURIComponent(keyword)}&count=${count}`)
+      const params = new URLSearchParams({
+        keyword,
+        count,
+        ...(since && { since }),
+        ...(until && { until }),
+      })
+      const res = await fetch(api(`/api/twitter/search?${params}`))
       const data = await res.json()
       if (!res.ok) throw new Error(data.detail || '오류 발생')
       setResult(data)
@@ -74,7 +83,6 @@ export default function TwitterSearch() {
         <p className="text-sm text-gray-400 mb-6">
           입력한 정보는 서버 메모리에만 유지되며 저장되지 않습니다.
         </p>
-
         <form onSubmit={handleLogin} className="flex flex-col gap-4">
           <input
             type="text"
@@ -100,9 +108,7 @@ export default function TwitterSearch() {
             className="border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
             required
           />
-          {loginError && (
-            <p className="text-red-500 text-sm">{loginError}</p>
-          )}
+          {loginError && <p className="text-red-500 text-sm">{loginError}</p>}
           <button
             type="submit"
             disabled={loginLoading}
@@ -120,11 +126,7 @@ export default function TwitterSearch() {
       <form onSubmit={handleSearch} className="bg-white rounded-2xl shadow p-6 flex flex-col gap-4">
         <div className="flex items-center justify-between">
           <h2 className="text-xl font-bold text-gray-800">Twitter 키워드 감성분석</h2>
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="text-xs text-gray-400 hover:text-gray-600 underline"
-          >
+          <button type="button" onClick={handleLogout} className="text-xs text-gray-400 hover:text-gray-600 underline">
             로그아웃
           </button>
         </div>
@@ -147,10 +149,34 @@ export default function TwitterSearch() {
             <option value={50}>50건</option>
             <option value={100}>100건</option>
           </select>
+        </div>
+
+        {/* 날짜 범위 */}
+        <div className="flex gap-3 items-center">
+          <span className="text-sm text-gray-500 shrink-0">기간</span>
+          <input
+            type="date"
+            value={since}
+            onChange={e => setSince(e.target.value)}
+            className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+          />
+          <span className="text-gray-400 text-sm">~</span>
+          <input
+            type="date"
+            value={until}
+            onChange={e => setUntil(e.target.value)}
+            className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+          />
+          {(since || until) && (
+            <button type="button" onClick={() => { setSince(''); setUntil('') }}
+              className="text-xs text-gray-400 hover:text-gray-600 underline shrink-0">
+              초기화
+            </button>
+          )}
           <button
             type="submit"
             disabled={loading}
-            className="bg-blue-500 hover:bg-blue-600 disabled:opacity-50 text-white font-semibold px-6 py-3 rounded-xl transition text-sm"
+            className="ml-auto bg-blue-500 hover:bg-blue-600 disabled:opacity-50 text-white font-semibold px-6 py-2.5 rounded-xl transition text-sm"
           >
             {loading ? '분석 중...' : '분석'}
           </button>
@@ -158,17 +184,11 @@ export default function TwitterSearch() {
       </form>
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-600 rounded-xl px-5 py-4 text-sm">
-          {error}
-        </div>
+        <div className="bg-red-50 border border-red-200 text-red-600 rounded-xl px-5 py-4 text-sm">{error}</div>
       )}
-
       {loading && (
-        <div className="text-center py-12 text-gray-400 text-sm">
-          트윗 크롤링 및 감성분석 중입니다...
-        </div>
+        <div className="text-center py-12 text-gray-400 text-sm">트윗 크롤링 및 감성분석 중입니다...</div>
       )}
-
       {result && (
         <>
           <SentimentChart summary={result.summary} />

@@ -36,12 +36,21 @@ def twitter_status():
 async def twitter_search(
     keyword: str = Query(..., min_length=1, max_length=100),
     count: int = Query(default=50, ge=10, le=100),
+    since: str = Query(default=None, description="YYYY-MM-DD"),
+    until: str = Query(default=None, description="YYYY-MM-DD"),
 ):
     if not is_logged_in():
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
 
+    # Twitter 검색 문법으로 날짜 범위 추가
+    query = keyword
+    if since:
+        query += f" since:{since}"
+    if until:
+        query += f" until:{until}"
+
     try:
-        tweets = await search_tweets(keyword, count=count)
+        tweets = await search_tweets(query, count=count)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"크롤링 실패: {e}")
 
