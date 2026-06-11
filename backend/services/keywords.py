@@ -12,6 +12,13 @@ KOREAN_STOPWORDS = {
     '같은', '다른', '새로운', '좋은', '나쁜', '큰', '작은', '많은', '적은',
     '때', '곳', '분', '명', '개', '번', '번째', '할', '한', '하는', '되는',
     '있는', '없는', '같이', '처럼', '보다', '부터', '까지', '이후', '이전',
+    '영상', '동영상', '댓글', '유튜브', '채널', '구독', '좋아요', '싫어요',
+    '감사', '감사합니다', '감사해요', '고맙습니다', '고마워요',
+    '봤어요', '봤습니다', '보다', '보세요', '봐요',
+    '했어요', '했습니다', '해요', '해줘요', '해주세요',
+    '이에요', '입니다', '이야', '이야요',
+    '완전', '진짜로', '너무나', '되게', '엄청',
+    'ㅋ', 'ㅠ', 'ㅎ', 'ㄷ', 'ㅇ', 'ㅜ', 'ㅡ',
 }
 
 ENGLISH_STOPWORDS = {
@@ -24,9 +31,22 @@ ENGLISH_STOPWORDS = {
     'not', 'no', 'so', 'if', 'as', 'up', 'out', 'about', 'than', 'then',
     'just', 'very', 'also', 'really', 'get', 'got', 'like', 'can', 'im',
     'its', 'ive', 'dont', 'cant', 'wont', 'isnt', 'arent',
+    'good', 'great', 'nice', 'love', 'wow', 'yes', 'yeah', 'ok', 'okay',
+    'thanks', 'thank', 'lol', 'omg', 'bro', 'dude', 'man', 'guys',
+    'come', 'see', 'know', 'think', 'way', 'time', 'go', 'make',
+    'one', 'two', 'first', 'last', 'new', 'old', 'big', 'little',
+    'more', 'most', 'much', 'many', 'some', 'any', 'all', 'every',
+    'been', 'being', 'still', 'too', 'even', 'well', 'back', 'same',
+    'hi', 'hey', 'oh', 'ah', 'uh', 'um',
 }
 
 STOPWORDS = KOREAN_STOPWORDS | ENGLISH_STOPWORDS
+
+HAS_KOREAN = re.compile(r'[가-힣ㄱ-ㅎㅏ-ㅣ]')
+
+
+def _has_korean(word: str) -> bool:
+    return bool(HAS_KOREAN.search(word))
 
 
 def extract_keywords(texts: list[str], top_n: int = 20) -> list[dict]:
@@ -35,8 +55,8 @@ def extract_keywords(texts: list[str], top_n: int = 20) -> list[dict]:
     for text in texts:
         text = re.sub(r'http\S+', '', text)
         text = re.sub(r'@\w+', '', text)
-        text = re.sub(r'#(\w+)', r'\1', text)  # 해시태그는 단어만 남김
-        text = re.sub(r'[^\w\s가-힣]', ' ', text)
+        text = re.sub(r'#(\w+)', r'\1', text)
+        text = re.sub(r'[^\w\s가-힣ㄱ-ㅎㅏ-ㅣ]', ' ', text)
 
         for word in text.lower().split():
             word = word.strip()
@@ -46,6 +66,11 @@ def extract_keywords(texts: list[str], top_n: int = 20) -> list[dict]:
                 continue
             if word in STOPWORDS:
                 continue
+            # 영어 단어는 5글자 미만이면 제외 (한국어는 제외 안 함)
+            if not _has_korean(word) and len(word) < 5:
+                continue
             counter[word] += 1
 
-    return [{'word': w, 'count': c} for w, c in counter.most_common(top_n)]
+    # 한국어 포함 단어를 우선 정렬 (빈도수 동일 시 한국어 우선)
+    sorted_words = sorted(counter.items(), key=lambda x: (x[1], _has_korean(x[0])), reverse=True)
+    return [{'word': w, 'count': c} for w, c in sorted_words[:top_n]]

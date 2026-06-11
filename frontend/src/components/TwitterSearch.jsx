@@ -20,6 +20,8 @@ export default function TwitterSearch() {
   const [loadingStepIdx, setLoadingStepIdx] = useState(0)
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
+  const [selectedKeyword, setSelectedKeyword] = useState(null)
+  const today = new Date().toISOString().split('T')[0]
 
   useEffect(() => {
     fetch(api('/api/twitter/status'))
@@ -172,6 +174,7 @@ export default function TwitterSearch() {
           <input
             type="date"
             value={since}
+            max={today}
             onChange={e => setSince(e.target.value)}
             className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
           />
@@ -179,6 +182,7 @@ export default function TwitterSearch() {
           <input
             type="date"
             value={until}
+            max={today}
             onChange={e => setUntil(e.target.value)}
             className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
           />
@@ -221,9 +225,9 @@ export default function TwitterSearch() {
       {result && (
         <>
           <SentimentChart summary={result.summary} />
-          <KeywordChart keywords={result.keywords} />
+          <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
           <TopAccounts accounts={result.summary.top_accounts} type="twitter" />
-          <ItemList items={result.items} type="twitter" />
+          <ItemList items={result.items} type="twitter" filterKeyword={selectedKeyword} />
         </>
       )}
     </div>

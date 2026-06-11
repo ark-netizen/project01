@@ -27,6 +27,8 @@ export default function YoutubeSearch() {
   const [progress, setProgress] = useState(null)
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
+  const [selectedKeyword, setSelectedKeyword] = useState(null)
+  const today = new Date().toISOString().split('T')[0]
   const pollRef = useRef(null)
 
   function stopPoll() {
@@ -179,10 +181,10 @@ export default function YoutubeSearch() {
 
         <div className="flex gap-3 items-center flex-wrap">
           <span className="text-sm text-gray-500 shrink-0">기간</span>
-          <input type="date" value={since} onChange={e => setSince(e.target.value)}
+          <input type="date" value={since} max={today} onChange={e => setSince(e.target.value)}
             className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400" />
           <span className="text-gray-400 text-sm">~</span>
-          <input type="date" value={until} onChange={e => setUntil(e.target.value)}
+          <input type="date" value={until} max={today} onChange={e => setUntil(e.target.value)}
             className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400" />
           {(since || until) && (
             <button type="button" onClick={() => { setSince(''); setUntil('') }}
@@ -264,9 +266,9 @@ export default function YoutubeSearch() {
             </div>
           )}
           <SentimentChart summary={result.summary} />
-          <KeywordChart keywords={result.keywords} />
+          <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
           <TopAccounts accounts={result.summary?.top_accounts} type="youtube" />
-          <ItemList items={result.items} type="youtube" />
+          <ItemList items={result.items} type="youtube" filterKeyword={selectedKeyword} />
         </>
       )}
     </div>
