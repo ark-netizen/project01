@@ -20,7 +20,7 @@ _BEARER = (
     "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 )
 
-# Fallback query IDs (may be outdated — dynamic fetch is preferred)
+# Fallback query IDs (may be outdated — live fetch is preferred)
 _FALLBACK_QIDS = [
     "nK1dw4oV3k4w5TdtcAdSww",
     "gkjsKepM6gl_HmFWoWKfgg",
@@ -52,8 +52,8 @@ _FEATURES = json.dumps({
 
 _FIELD_TOGGLES = json.dumps({"withArticleRichContentState": False}, separators=(',', ':'))
 
-# Cached live query ID
 _live_qid: str | None = None
+_live_qid_debug: str = ""
 _qid_lock = threading.Lock()
 
 
@@ -64,69 +64,88 @@ def _redact(msg: str) -> str:
     return msg
 
 
-def _fetch_live_query_id() -> str | None:
-    """Fetch the current SearchTimeline queryId from x.com JS bundles."""
+def _find_search_qid(text: str) -> str | None:
+    """Find SearchTimeline query ID from JS/HTML text."""
+    # Most reliable: the full constructed URL appears in the JS
+    for m in re.finditer(r'/graphql/([A-Za-z0-9_-]{15,})/SearchTimeline', text):
+        return m.group(1)
+
+    # queryId value immediately adjacent to operationName:"SearchTimeline"
+    for pat in (
+        r'"queryId"\s*:\s*"([A-Za-z0-9_-]{15,})"[^}]{0,500}"operationName"\s*:\s*"SearchTimeline"',
+        r'"operationName"\s*:\s*"SearchTimeline"[^}]{0,500}"queryId"\s*:\s*"([A-Za-z0-9_-]{15,})"',
+        r'queryId:"([A-Za-z0-9_-]{15,})"[^}]{0,500}operationName:"SearchTimeline"',
+        r'operationName:"SearchTimeline"[^}]{0,500}queryId:"([A-Za-z0-9_-]{15,})"',
+    ):
+        m = re.search(pat, text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _fetch_live_query_id() -> tuple[str | None, str]:
+    """Returns (queryId, debug_info). Fetches from x.com JS bundles."""
     if not _USE_CURL:
-        return None
+        return None, "curl_cffi not available"
     curl_kw = {"impersonate": "chrome120"}
+    debug: list[str] = []
     try:
-        r = curl_req.get(
-            "https://x.com/search?q=test&f=live",
+        page = curl_req.get(
+            "https://x.com/",
             headers={"Accept": "text/html,application/xhtml+xml,*/*",
                      "Accept-Language": "en-US,en;q=0.9"},
             timeout=20, **curl_kw,
         )
-        if not r.text:
-            return None
+        html = page.text or ""
+        debug.append(f"html={len(html)}chars")
 
-        # Collect JS bundle URLs from the page
-        js_urls: list[str] = re.findall(
-            r'https://abs\.twimg\.com/responsive-web/client-web/[^\s"\']+\.js',
-            r.text,
-        )
-        # Also try relative paths
-        for rel in re.findall(r'"(/responsive-web/client-web/[^\s"\']+\.js)"', r.text):
-            js_urls.append("https://abs.twimg.com" + rel)
+        # Check directly in HTML first
+        qid = _find_search_qid(html)
+        if qid:
+            return qid, f"found in HTML"
 
-        seen: set[str] = set()
-        for url in js_urls[:12]:
-            if url in seen:
-                continue
-            seen.add(url)
+        # Collect JS bundle URLs
+        js_urls: list[str] = list(dict.fromkeys(
+            re.findall(r'https://abs\.twimg\.com/responsive-web/client-web/[^\s"\'<>]+\.js', html)
+        ))
+        # Prefer bundles likely to have API code
+        js_urls.sort(key=lambda u: (0 if any(k in u for k in ("main", "api", "bundle")) else 1))
+        debug.append(f"bundles={len(js_urls)}")
+
+        for js_url in js_urls[:20]:
             try:
-                jr = curl_req.get(url, timeout=15, **curl_kw)
-                if not jr.text:
+                jr = curl_req.get(js_url, timeout=15, **curl_kw)
+                text = jr.text or ""
+                if len(text) < 1000:
                     continue
-                for pattern in (
-                    r'queryId:"([A-Za-z0-9_-]{20,})"[^"]{0,80}operationName:"SearchTimeline"',
-                    r'operationName:"SearchTimeline"[^"]{0,80}queryId:"([A-Za-z0-9_-]{20,})"',
-                    r'"SearchTimeline"[^"]{0,40}"([A-Za-z0-9_-]{20,})"',
-                ):
-                    m = re.search(pattern, jr.text)
-                    if m:
-                        return m.group(1)
-            except Exception:
+                qid = _find_search_qid(text)
+                if qid:
+                    fname = js_url.split("/")[-1][:30]
+                    return qid, f"found in {fname}"
+            except Exception as e:
+                debug.append(f"js_err:{str(e)[:30]}")
                 continue
-    except Exception:
-        pass
-    return None
+
+        debug.append("not found in any bundle")
+    except Exception as e:
+        debug.append(f"page_err:{str(e)[:60]}")
+    return None, "; ".join(debug)
 
 
 async def initialize() -> None:
     global _auth_token, _ct0
     _auth_token = os.getenv("TWITTER_AUTH_TOKEN", "").strip()
     _ct0 = os.getenv("TWITTER_CT0", "").strip()
-    # Warm up the live query ID in the background
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, _warm_query_id)
+    asyncio.get_event_loop().run_in_executor(None, _warm_query_id)
 
 
 def _warm_query_id() -> None:
-    global _live_qid
+    global _live_qid, _live_qid_debug
     with _qid_lock:
         if _live_qid:
             return
-        qid = _fetch_live_query_id()
+        qid, dbg = _fetch_live_query_id()
+        _live_qid_debug = dbg
         if qid:
             _live_qid = qid
 
@@ -188,7 +207,6 @@ def _parse_graphql(data: dict) -> list[dict] | None:
 
 
 def _try_qid(qid: str, base: str, headers: dict, cookies: dict, variables: str) -> list[dict] | str:
-    """Return tweets list on success, or error string on failure."""
     url = f"{base}/i/api/graphql/{qid}/SearchTimeline"
     tag = f"[{base.split('/')[2][:5]}:{qid[:8]}]"
     curl_kw = {"impersonate": "chrome120"} if _USE_CURL else {}
@@ -229,7 +247,7 @@ def _try_qid(qid: str, base: str, headers: dict, cookies: dict, variables: str) 
 
 
 def _search_sync(keyword: str, count: int) -> list[dict]:
-    global _live_qid
+    global _live_qid, _live_qid_debug
 
     headers = {
         "Authorization": f"Bearer {_BEARER}",
@@ -250,7 +268,6 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         "product": "Latest",
     }, separators=(',', ':'))
 
-    # Build ordered list: live qid first, then fallbacks
     qids = []
     if _live_qid:
         qids.append(_live_qid)
@@ -258,30 +275,33 @@ def _search_sync(keyword: str, count: int) -> list[dict]:
         if q not in qids:
             qids.append(q)
 
-    all_404 = True
     errors = []
+    all_404 = True
     for qid in qids:
         for base in ("https://x.com", "https://twitter.com"):
-            result = _try_qid(qid, base, headers, cookies, variables)
-            if isinstance(result, list):
-                return result
-            errors.append(result)
-            if "qid만료(404)" not in result:
+            res = _try_qid(qid, base, headers, cookies, variables)
+            if isinstance(res, list):
+                return res
+            errors.append(res)
+            if "qid만료(404)" not in res:
                 all_404 = False
 
-    # All were 404 → try to fetch live qid and retry once
+    # All 404 — try fresh live fetch
     if all_404:
-        fresh = _fetch_live_query_id()
+        fresh, dbg = _fetch_live_query_id()
+        _live_qid_debug = dbg
         if fresh and fresh not in qids:
             with _qid_lock:
                 _live_qid = fresh
             for base in ("https://x.com", "https://twitter.com"):
-                result = _try_qid(fresh, base, headers, cookies, variables)
-                if isinstance(result, list):
-                    return result
-                errors.append(f"[live:{fresh[:8]}] {result}")
+                res = _try_qid(fresh, base, headers, cookies, variables)
+                if isinstance(res, list):
+                    return res
+                errors.append(f"[fresh:{fresh[:8]}] {res}")
+        else:
+            errors.append(f"live_fetch={dbg}")
 
-    curl_info = f"curl_cffi={'on' if _USE_CURL else 'off'}"
+    curl_info = f"curl={'on' if _USE_CURL else 'off'}"
     raise RuntimeError(f"Twitter 검색 실패 ({curl_info}): " + " / ".join(errors))
 
 
