@@ -59,6 +59,22 @@ def debug_twitter():
     return debug_info()
 
 
+@app.get("/api/debug/twikit-ct-source")
+def debug_twikit_ct_source():
+    import inspect, importlib
+    try:
+        mod = importlib.import_module("twikit.guest.client")
+        ct = getattr(mod, "ClientTransaction", None)
+        if ct is None:
+            return {"error": "ClientTransaction not found"}
+        return {
+            "source": inspect.getsource(ct),
+            "module": "twikit.guest.client",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "ok"}
