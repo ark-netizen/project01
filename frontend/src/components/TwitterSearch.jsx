@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { api } from '../api'
 import SentimentChart from './SentimentChart'
 import TopAccounts from './TopAccounts'
+import KeywordChart from './KeywordChart'
 import ItemList from './ItemList'
 
 export default function TwitterSearch() {
@@ -192,6 +193,7 @@ export default function TwitterSearch() {
       {result && (
         <>
           <SentimentChart summary={result.summary} />
+          <KeywordChart keywords={result.keywords} />
           <TopAccounts accounts={result.summary.top_accounts} type="twitter" />
           <ItemList items={result.items} type="twitter" />
         </>

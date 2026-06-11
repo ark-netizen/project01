@@ -25,17 +25,24 @@ def _call_hf(texts: list[str]) -> list[dict]:
     token = os.getenv("HF_TOKEN", "")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
-    with httpx.Client(timeout=60) as client:
-        resp = client.post(
-            HF_API_URL,
-            headers=headers,
-            json={"inputs": texts, "options": {"wait_for_model": True}},
-        )
+    with httpx.Client(timeout=120) as client:
+        for attempt in range(3):
+            resp = client.post(
+                HF_API_URL,
+                headers=headers,
+                json={"inputs": texts, "options": {"wait_for_model": True}},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            # 모델 로딩 중 (503) → 대기 후 재시도
+            if resp.status_code == 503:
+                import time
+                wait = resp.json().get("estimated_time", 20)
+                time.sleep(min(wait, 30))
+                continue
+            raise RuntimeError(f"HuggingFace API 오류 {resp.status_code}: {resp.text[:200]}")
 
-    if resp.status_code != 200:
-        raise RuntimeError(f"HuggingFace API 오류 {resp.status_code}: {resp.text[:200]}")
-
-    return resp.json()
+    raise RuntimeError("HuggingFace API 재시도 초과")
 
 
 def analyze_batch(texts: list[str]) -> list[dict]:

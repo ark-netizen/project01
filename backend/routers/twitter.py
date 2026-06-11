@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from services.twitter_crawler import login, logout, is_logged_in, search_tweets
 from services.sentiment import analyze_batch, summarize
+from services.keywords import extract_keywords
 
 router = APIRouter(prefix="/api/twitter", tags=["twitter"])
 
@@ -66,4 +67,5 @@ async def twitter_search(
         "keyword": keyword,
         "items": items,
         "summary": summarize(sentiments, tweets),
+        "keywords": extract_keywords([t["text"] for t in tweets]),
     }
