@@ -1,6 +1,6 @@
 import re
 import os
-import httpx
+import requests as _requests
 
 # 소셜미디어 다국어(한국어 포함) 감성분석 모델
 HF_API_URL = (
@@ -23,31 +23,37 @@ def clean_text(text: str) -> str:
 
 
 def _call_hf(texts: list[str]) -> list:
+    import time
     token = os.getenv("HF_TOKEN", "")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
-    with httpx.Client(timeout=120) as client:
-        for attempt in range(3):
-            resp = client.post(
+    for attempt in range(3):
+        try:
+            resp = _requests.post(
                 HF_API_URL,
                 headers=headers,
                 json={"inputs": texts, "options": {"wait_for_model": True}},
+                timeout=120,
             )
-            if resp.status_code == 200:
-                data = resp.json()
-                # 오류 응답 감지
-                if isinstance(data, dict) and "error" in data:
-                    raise RuntimeError(f"HF 응답 오류: {data['error']}")
-                return data
-            if resp.status_code == 503:
-                import time
-                try:
-                    wait = resp.json().get("estimated_time", 20)
-                except Exception:
-                    wait = 20
-                time.sleep(min(wait, 30))
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(5)
                 continue
-            raise RuntimeError(f"HuggingFace API 오류 {resp.status_code}: {resp.text[:300]}")
+            raise RuntimeError(f"HuggingFace 연결 실패: {e}")
+
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and "error" in data:
+                raise RuntimeError(f"HF 응답 오류: {data['error']}")
+            return data
+        if resp.status_code == 503:
+            try:
+                wait = resp.json().get("estimated_time", 20)
+            except Exception:
+                wait = 20
+            time.sleep(min(wait, 30))
+            continue
+        raise RuntimeError(f"HuggingFace API 오류 {resp.status_code}: {resp.text[:300]}")
 
     raise RuntimeError("HuggingFace API 재시도 3회 초과")
 

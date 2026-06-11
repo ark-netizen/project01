@@ -11,7 +11,7 @@ youtube-comment-downloader
 youtube-search-python
 
 # HuggingFace Inference API 호출
-httpx
+requests
 
 # YouTube 날짜 파싱
 dateparser
