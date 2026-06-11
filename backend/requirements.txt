@@ -8,7 +8,7 @@ twikit
 # YouTube 댓글 크롤링 (API키 불필요)
 youtube-comment-downloader
 # YouTube 키워드 영상 검색 (API키 불필요)
-youtubesearchpython
+youtube-search-python
 
 # HuggingFace Inference API 호출
 httpx
