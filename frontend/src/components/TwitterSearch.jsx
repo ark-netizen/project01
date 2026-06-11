@@ -19,6 +19,7 @@ export default function TwitterSearch() {
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
   const [selectedKeyword, setSelectedKeyword] = useState(null)
+  const [selectedSentiment, setSelectedSentiment] = useState(null)
   const [cooldown, setCooldown] = useState(0)
   const cooldownRef = useRef(null)
   const today = new Date().toISOString().split('T')[0]
@@ -52,6 +53,7 @@ export default function TwitterSearch() {
     setError('')
     setResult(null)
     setSelectedKeyword(null)
+    setSelectedSentiment(null)
 
     const steps = ['트윗 수집 중...', '감성 분석 중...', '키워드 추출 중...']
     let idx = 0
@@ -196,7 +198,7 @@ export default function TwitterSearch() {
         <>
           <div className="flex gap-5 items-start">
             <div className="flex-1 min-w-0">
-              <SentimentChart summary={result.summary} />
+              <SentimentChart summary={result.summary} selectedSentiment={selectedSentiment} onSelect={setSelectedSentiment} />
             </div>
             <div className="w-52 shrink-0">
               <TopAccounts accounts={result.summary.top_accounts} type="twitter" vertical />
@@ -207,7 +209,7 @@ export default function TwitterSearch() {
               <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
             </div>
             <div className="flex-1 min-w-0">
-              <ItemList items={result.items} type="twitter" filterKeyword={selectedKeyword} />
+              <ItemList items={result.items} type="twitter" filterKeyword={selectedKeyword} filterSentiment={selectedSentiment} />
             </div>
           </div>
         </>

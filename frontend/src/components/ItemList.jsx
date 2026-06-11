@@ -6,12 +6,15 @@ const BADGE = {
 
 const LABEL_KO = { positive: '긍정', neutral: '중립', negative: '부정' }
 
-export default function ItemList({ items, type, filterKeyword }) {
+export default function ItemList({ items, type, filterKeyword, filterSentiment }) {
   if (!items || items.length === 0) return null
 
-  const filtered = filterKeyword
-    ? items.filter(item => item.text?.toLowerCase().includes(filterKeyword.toLowerCase()))
-    : items
+  let filtered = items
+  if (filterKeyword) filtered = filtered.filter(item => item.text?.toLowerCase().includes(filterKeyword.toLowerCase()))
+  if (filterSentiment) filtered = filtered.filter(item => (item.sentiment?.label ?? 'neutral') === filterSentiment)
+
+  const SENTIMENT_LABEL = { positive: '긍정', neutral: '중립', negative: '부정' }
+  const isFiltered = filterKeyword || filterSentiment
 
   return (
     <div className="bg-white rounded-2xl shadow p-6">
@@ -19,9 +22,10 @@ export default function ItemList({ items, type, filterKeyword }) {
         <h3 className="text-lg font-semibold text-gray-700">
           {type === 'twitter' ? '트윗 목록' : '댓글 목록'}
         </h3>
-        {filterKeyword && (
+        {isFiltered && (
           <span className="text-xs text-indigo-600 bg-indigo-50 rounded-full px-2.5 py-1">
             {filtered.length}건 / 전체 {items.length}건
+            {filterSentiment && ` · ${SENTIMENT_LABEL[filterSentiment]}`}
           </span>
         )}
       </div>

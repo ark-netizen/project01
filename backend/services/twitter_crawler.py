@@ -18,14 +18,15 @@ def _patch_twikit():
     async def _no_txn(self, *args, **kwargs):
         return ""
 
-    # ClientTransaction.get_transaction_id 패치
     try:
         import twikit.client_transaction as ct
         ct.ClientTransaction.get_transaction_id = _no_txn
+        # 'key' 속성도 직접 접근하므로 None으로 미리 설정
+        ct.ClientTransaction.key = None
+        ct.ClientTransaction.key_bytes_indices = []
     except Exception:
         pass
 
-    # Client._get_client_transaction_id 패치 (버전에 따라 위치 다름)
     try:
         from twikit.client.client import Client as TC
         TC._get_client_transaction_id = _no_txn

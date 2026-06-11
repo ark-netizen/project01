@@ -28,6 +28,7 @@ export default function YoutubeSearch() {
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
   const [selectedKeyword, setSelectedKeyword] = useState(null)
+  const [selectedSentiment, setSelectedSentiment] = useState(null)
   const today = new Date().toISOString().split('T')[0]
   const pollRef = useRef(null)
 
@@ -51,6 +52,7 @@ export default function YoutubeSearch() {
     setError('')
     setResult(null)
     setProgress(null)
+    setSelectedSentiment(null)
 
     if (mode === 'keyword') {
       // 1단계: 작업 시작
@@ -267,7 +269,7 @@ export default function YoutubeSearch() {
           )}
           <div className="flex gap-5 items-start">
             <div className="flex-1 min-w-0">
-              <SentimentChart summary={result.summary} />
+              <SentimentChart summary={result.summary} selectedSentiment={selectedSentiment} onSelect={setSelectedSentiment} />
             </div>
             {result.summary?.top_accounts?.length > 0 && (
               <div className="w-52 shrink-0">
@@ -280,7 +282,7 @@ export default function YoutubeSearch() {
               <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
             </div>
             <div className="flex-1 min-w-0">
-              <ItemList items={result.items} type="youtube" filterKeyword={selectedKeyword} />
+              <ItemList items={result.items} type="youtube" filterKeyword={selectedKeyword} filterSentiment={selectedSentiment} />
             </div>
           </div>
         </>
