@@ -59,46 +59,14 @@ def debug_twitter():
     return debug_info()
 
 
-@app.get("/api/debug/ondemand-check")
-async def debug_ondemand():
-    import re
+@app.get("/api/debug/ct-consts")
+def debug_ct_consts():
+    import importlib
     try:
-        from curl_cffi import requests as curl_req
-    except ImportError:
-        return {"error": "no curl_cffi"}
-    try:
-        r = curl_req.get("https://x.com/", impersonate="chrome120", timeout=20,
-                         headers={"Accept": "text/html,*/*", "Cache-Control": "no-cache"})
-        html = r.text or ""
-
-        # Find all ondemand-related substrings (show context)
-        ondemand_hits = []
-        for m in re.finditer(r'ondemand.{0,80}', html):
-            ondemand_hits.append(m.group())
-        ondemand_hits = ondemand_hits[:10]
-
-        # Try multiple URL patterns
-        url = None
-        for pat in (
-            r'ondemand\.s\.([\w]+)a\.js',
-            r'ondemand\.s\.([\w-]+)\.js',
-            r'"ondemand\.s","([\w]+)"',
-            r'ondemand[._]s[._]([\w]+)',
-        ):
-            m2 = re.search(pat, html)
-            if m2:
-                url = m2.group(0)
-                break
-
-        return {
-            "html_len": len(html),
-            "meta_tag": "<meta name=\"twitter-site-verification\"" in html,
-            "anim_tag": "loading-x-anim" in html,
-            "ondemand_url_found": url,
-            "ondemand_hits": ondemand_hits,
-        }
-    except Exception as e:
-        return {"error": str(e)}
+        mod = importlib.import_module("twikit.guest.client")
+        CT = mod.ClientTransaction
+        return {k: repr(v) for k, v in vars(CT).items()
+                if not k.startswith("__") and not callable(v)}
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
