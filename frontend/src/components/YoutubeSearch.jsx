@@ -29,6 +29,7 @@ export default function YoutubeSearch() {
   const [error, setError] = useState('')
   const [selectedKeyword, setSelectedKeyword] = useState(null)
   const [selectedSentiment, setSelectedSentiment] = useState(null)
+  const [checkedVideos, setCheckedVideos] = useState(null) // null = 전체
   const today = new Date().toISOString().split('T')[0]
   const pollRef = useRef(null)
 
@@ -53,6 +54,7 @@ export default function YoutubeSearch() {
     setResult(null)
     setProgress(null)
     setSelectedSentiment(null)
+    setCheckedVideos(null)
 
     if (mode === 'keyword') {
       // 1단계: 작업 시작
@@ -253,23 +255,37 @@ export default function YoutubeSearch() {
 
       {result && (
         <>
-          {result.videos?.length > 0 && (
-            <div className="bg-white rounded-2xl shadow p-6">
-              <h3 className="text-lg font-semibold text-gray-700 mb-3">분석한 영상 ({result.videos.length}개)</h3>
-              <div className="flex flex-col gap-1">
-                {result.videos.map(v => (
-                  <a key={v.id} href={v.url} target="_blank" rel="noopener noreferrer"
-                    className="flex items-center justify-between text-sm hover:bg-gray-50 rounded-lg px-3 py-2 transition gap-3">
-                    <span className="text-gray-800 truncate flex-1">{v.title}</span>
-                    <span className="text-gray-400 shrink-0 text-xs hidden sm:inline">{v.channel}</span>
-                    {v.views && <span className="text-gray-400 shrink-0 text-xs">👁 {v.views}</span>}
-                    {v.duration && <span className="text-gray-400 shrink-0 text-xs">{v.duration}</span>}
-                    {v.published && <span className="text-gray-400 shrink-0 text-xs hidden md:inline">{v.published}</span>}
-                  </a>
-                ))}
+          {result.videos?.length > 0 && (() => {
+            const active = checkedVideos ?? new Set(result.videos.map(v => v.id))
+            function toggle(id) {
+              const next = new Set(active)
+              next.has(id) ? next.delete(id) : next.add(id)
+              setCheckedVideos(next)
+            }
+            return (
+              <div className="bg-white rounded-2xl shadow p-6">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-lg font-semibold text-gray-700">분석한 영상 ({result.videos.length}개)</h3>
+                  <span className="text-xs text-gray-400">체크한 영상의 댓글만 표시</span>
+                </div>
+                <div className="flex flex-col gap-1">
+                  {result.videos.map(v => (
+                    <div key={v.id} className="flex items-center gap-2 text-sm hover:bg-gray-50 rounded-lg px-2 py-1.5 transition">
+                      <input type="checkbox" checked={active.has(v.id)} onChange={() => toggle(v.id)}
+                        className="w-4 h-4 accent-red-500 shrink-0 cursor-pointer" />
+                      <a href={v.url} target="_blank" rel="noopener noreferrer"
+                        className="text-gray-800 truncate flex-1 hover:text-red-500 hover:underline">
+                        {v.title}
+                      </a>
+                      <span className="text-gray-400 shrink-0 text-xs hidden sm:inline">{v.channel}</span>
+                      {v.views && <span className="text-gray-400 shrink-0 text-xs">👁 {v.views}</span>}
+                      {v.duration && <span className="text-gray-400 shrink-0 text-xs">{v.duration}</span>}
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            )
+          })()}
           <div className="flex gap-5 items-start">
             <div className="flex-1 min-w-0">
               <SentimentChart summary={result.summary} selectedSentiment={selectedSentiment} onSelect={setSelectedSentiment} />
@@ -285,7 +301,14 @@ export default function YoutubeSearch() {
               <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
             </div>
             <div className="flex-1 min-w-0">
-              <ItemList items={result.items} type="youtube" filterKeyword={selectedKeyword} filterSentiment={selectedSentiment} />
+              <ItemList
+                items={checkedVideos
+                  ? result.items.filter(it => checkedVideos.has(result.videos?.find(v => v.title === it.video_title)?.id ?? ''))
+                  : result.items}
+                type="youtube"
+                filterKeyword={selectedKeyword}
+                filterSentiment={selectedSentiment}
+              />
             </div>
           </div>
         </>

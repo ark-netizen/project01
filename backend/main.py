@@ -29,14 +29,21 @@ async def startup():
 
 @app.post("/api/translate")
 def translate_text(body: dict):
-    import requests as req
+    import re, requests as req
     text = str(body.get("text", ""))[:500]
     if not text:
         return {"translated": ""}
+    # 간단한 언어 감지
+    if re.search(r'[぀-ゟ゠-ヿ]', text):
+        langpair = "ja|ko"
+    elif re.search(r'[一-鿿]', text):
+        langpair = "zh-CN|ko"
+    else:
+        langpair = "en|ko"
     try:
         r = req.get(
             "https://api.mymemory.translated.net/get",
-            params={"q": text, "langpair": "auto|ko"},
+            params={"q": text, "langpair": langpair},
             timeout=8,
         )
         data = r.json()

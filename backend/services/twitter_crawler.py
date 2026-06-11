@@ -14,36 +14,34 @@ def _redact(msg: str) -> str:
 
 
 def _patch_twikit():
-    """Render 서버 IP에서 Twitter JS 파싱 실패(KEY_BYTE) 우회 패치"""
-    async def _no_txn(self, *args, **kwargs):
-        return ""
+    """Render 서버 IP에서 Twitter JS 파싱 실패(KEY_BYTE) 우회 — ClientTransaction 완전 대체"""
+    class _NoOpTransaction:
+        key = None
+        key_bytes_indices = []
+
+        def __init__(self, *args, **kwargs):
+            self.key = None
+            self.key_bytes_indices = []
+
+        async def get_transaction_id(self, *args, **kwargs):
+            return ""
 
     try:
         import twikit.client_transaction as ct
+        ct.ClientTransaction = _NoOpTransaction
+    except Exception:
+        pass
 
-        # __init__을 래핑해서 key 속성을 항상 초기화
-        _orig_init = ct.ClientTransaction.__init__
-        def _safe_init(self, *args, **kwargs):
-            try:
-                _orig_init(self, *args, **kwargs)
-            except Exception:
-                pass
-            try:
-                self.key = None
-            except Exception:
-                pass
-            try:
-                self.key_bytes_indices = []
-            except Exception:
-                pass
-
-        ct.ClientTransaction.__init__ = _safe_init
-        ct.ClientTransaction.get_transaction_id = _no_txn
+    try:
+        from twikit.client import client as tc_module
+        tc_module.ClientTransaction = _NoOpTransaction
     except Exception:
         pass
 
     try:
         from twikit.client.client import Client as TC
+        async def _no_txn(self, *args, **kwargs):
+            return ""
         TC._get_client_transaction_id = _no_txn
     except Exception:
         pass
