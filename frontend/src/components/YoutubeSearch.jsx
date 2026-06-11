@@ -253,25 +253,56 @@ export default function YoutubeSearch() {
         </div>
       )}
 
-      {result && (
-        <>
-          {result.videos?.length > 0 && (() => {
-            const active = checkedVideos ?? new Set(result.videos.map(v => v.id))
-            function toggle(id) {
-              const next = new Set(active)
-              next.has(id) ? next.delete(id) : next.add(id)
-              setCheckedVideos(next)
-            }
-            return (
+      {result && (() => {
+        // 체크된 영상 기준으로 모든 데이터 재계산
+        const activeIds = checkedVideos ?? new Set(result.videos?.map(v => v.id) ?? [])
+        const videoTitleToId = Object.fromEntries((result.videos ?? []).map(v => [v.title, v.id]))
+
+        const filteredItems = result.videos?.length > 0
+          ? result.items.filter(it => activeIds.has(videoTitleToId[it.video_title] ?? ''))
+          : result.items
+
+        // 감성 요약 재계산
+        const total = filteredItems.length
+        const pos = filteredItems.filter(i => i.sentiment?.label === 'positive').length
+        const neg = filteredItems.filter(i => i.sentiment?.label === 'negative').length
+        const neu = total - pos - neg
+        const acctMap = {}
+        filteredItems.forEach(i => {
+          const a = i.author || i.user || 'unknown'
+          acctMap[a] = (acctMap[a] || 0) + 1
+        })
+        const top_accounts = Object.entries(acctMap).sort((a,b)=>b[1]-a[1]).slice(0,7).map(([account,count])=>({account,count}))
+        const filteredSummary = {
+          total, positive: pos, negative: neg, neutral: neu,
+          positive_pct: total ? Math.round(pos/total*100) : 0,
+          negative_pct: total ? Math.round(neg/total*100) : 0,
+          neutral_pct: total ? Math.round(neu/total*100) : 0,
+          top_accounts,
+        }
+
+        // 키워드: 필터된 댓글에 등장하는 것만
+        const allText = filteredItems.map(i => i.text?.toLowerCase() ?? '').join(' ')
+        const filteredKeywords = (result.keywords ?? []).filter(k => allText.includes(k.word.toLowerCase()))
+
+        function toggle(id) {
+          const next = new Set(activeIds)
+          next.has(id) ? next.delete(id) : next.add(id)
+          setCheckedVideos(next)
+        }
+
+        return (
+          <>
+            {result.videos?.length > 0 && (
               <div className="bg-white rounded-2xl shadow p-6">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-lg font-semibold text-gray-700">분석한 영상 ({result.videos.length}개)</h3>
-                  <span className="text-xs text-gray-400">체크한 영상의 댓글만 표시</span>
+                  <span className="text-xs text-gray-400">체크 해제 시 해당 영상 제외</span>
                 </div>
                 <div className="flex flex-col gap-1">
                   {result.videos.map(v => (
                     <div key={v.id} className="flex items-center gap-2 text-sm hover:bg-gray-50 rounded-lg px-2 py-1.5 transition">
-                      <input type="checkbox" checked={active.has(v.id)} onChange={() => toggle(v.id)}
+                      <input type="checkbox" checked={activeIds.has(v.id)} onChange={() => toggle(v.id)}
                         className="w-4 h-4 accent-red-500 shrink-0 cursor-pointer" />
                       <a href={v.url} target="_blank" rel="noopener noreferrer"
                         className="text-gray-800 truncate flex-1 hover:text-red-500 hover:underline">
@@ -284,35 +315,28 @@ export default function YoutubeSearch() {
                   ))}
                 </div>
               </div>
-            )
-          })()}
-          <div className="flex gap-5 items-start">
-            <div className="flex-1 min-w-0">
-              <SentimentChart summary={result.summary} selectedSentiment={selectedSentiment} onSelect={setSelectedSentiment} />
-            </div>
-            {result.summary?.top_accounts?.length > 0 && (
-              <div className="w-52 shrink-0">
-                <TopAccounts accounts={result.summary.top_accounts} type="youtube" vertical />
-              </div>
             )}
-          </div>
-          <div className="flex gap-5 items-start">
-            <div className="flex-1 min-w-0">
-              <KeywordChart keywords={result.keywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
+            <div className="flex gap-5 items-start">
+              <div className="flex-1 min-w-0">
+                <SentimentChart summary={filteredSummary} selectedSentiment={selectedSentiment} onSelect={setSelectedSentiment} />
+              </div>
+              {top_accounts.length > 0 && (
+                <div className="w-52 shrink-0">
+                  <TopAccounts accounts={top_accounts} type="youtube" vertical />
+                </div>
+              )}
             </div>
-            <div className="flex-1 min-w-0">
-              <ItemList
-                items={checkedVideos
-                  ? result.items.filter(it => checkedVideos.has(result.videos?.find(v => v.title === it.video_title)?.id ?? ''))
-                  : result.items}
-                type="youtube"
-                filterKeyword={selectedKeyword}
-                filterSentiment={selectedSentiment}
-              />
+            <div className="flex gap-5 items-start">
+              <div className="flex-1 min-w-0">
+                <KeywordChart keywords={filteredKeywords} selectedKeyword={selectedKeyword} onSelect={setSelectedKeyword} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <ItemList items={filteredItems} type="youtube" filterKeyword={selectedKeyword} filterSentiment={selectedSentiment} />
+              </div>
             </div>
-          </div>
-        </>
-      )}
+          </>
+        )
+      })()}
     </div>
   )
 }
