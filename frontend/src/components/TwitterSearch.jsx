@@ -9,6 +9,7 @@ const COOLDOWN_SEC = 10
 
 export default function TwitterSearch() {
   const [ready, setReady] = useState(null) // null=확인중, true=준비됨, false=미설정
+  const [needsRelogin, setNeedsRelogin] = useState(false)
   const [keyword, setKeyword] = useState('')
   const [count, setCount] = useState(30)
   const [since, setSince] = useState('')
@@ -27,7 +28,7 @@ export default function TwitterSearch() {
   useEffect(() => {
     fetch(api('/api/twitter/status'))
       .then(r => r.json())
-      .then(d => setReady(d.ready))
+      .then(d => { setReady(d.ready); setNeedsRelogin(d.needs_relogin ?? false) })
       .catch(() => setReady(false))
   }, [])
 
@@ -100,12 +101,14 @@ export default function TwitterSearch() {
   if (ready === false) {
     return (
       <div className="bg-white rounded-2xl shadow p-8 max-w-md mx-auto text-center">
-        <div className="text-4xl mb-4">🔧</div>
-        <h2 className="text-lg font-bold text-gray-700 mb-2">Twitter 서비스 준비 중</h2>
+        <div className="text-4xl mb-4">{needsRelogin ? '🔑' : '🔧'}</div>
+        <h2 className="text-lg font-bold text-gray-700 mb-2">
+          {needsRelogin ? 'Twitter 세션 만료' : 'Twitter 서비스 준비 중'}
+        </h2>
         <p className="text-sm text-gray-400">
-          서버에 Twitter 인증 정보가 설정되지 않았습니다.<br />
-          Render 환경변수에 <code className="bg-gray-100 px-1 rounded">TWITTER_AUTH_TOKEN</code>과{' '}
-          <code className="bg-gray-100 px-1 rounded">TWITTER_CT0</code>를 등록해주세요.
+          {needsRelogin
+            ? '로그인 세션이 만료됐습니다. 관리자가 쿠키를 갱신해야 합니다.'
+            : '서버가 시작 중이거나 쿠키가 설정되지 않았습니다. 잠시 후 다시 시도해주세요.'}
         </p>
       </div>
     )
