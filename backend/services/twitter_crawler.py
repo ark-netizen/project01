@@ -62,8 +62,6 @@ async def initialize() -> None:
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
-                "--single-process",
-                "--no-zygote",
                 "--disable-extensions",
                 "--disable-default-apps",
                 "--disable-background-networking",
