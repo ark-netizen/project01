@@ -13,6 +13,12 @@ try:
 except ImportError:
     _PLAYWRIGHT_OK = False
 
+try:
+    from playwright_stealth import stealth_async
+    _STEALTH_OK = True
+except ImportError:
+    _STEALTH_OK = False
+
 _pw: Optional["Playwright"] = None
 _browser: Optional["Browser"] = None
 _context: Optional["BrowserContext"] = None
@@ -65,22 +71,8 @@ async def initialize() -> None:
         )
         await _context.add_cookies(cookies)
 
-        if not await _verify_session():
-            _needs_relogin = True
-
     except Exception:
         _needs_relogin = True
-
-
-async def _verify_session() -> bool:
-    page = await _context.new_page()
-    try:
-        await page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=20000)
-        return "/login" not in page.url and "/i/flow" not in page.url
-    except Exception:
-        return False
-    finally:
-        await page.close()
 
 
 def is_ready() -> bool:
@@ -133,6 +125,8 @@ async def _do_search(keyword: str, count: int) -> list[dict]:
         except Exception:
             pass
 
+    if _STEALTH_OK:
+        await stealth_async(page)
     page.on("response", on_response)
 
     try:
