@@ -12,8 +12,8 @@ COOLDOWN = 10  # 초
 
 @router.get("/status")
 def twitter_status():
-    from services.twitter_crawler import relogin_required
-    return {"ready": is_ready(), "needs_relogin": relogin_required()}
+    from services.twitter_crawler import relogin_required, _init_error
+    return {"ready": is_ready(), "needs_relogin": relogin_required(), "init_error": _init_error}
 
 
 @router.get("/search")

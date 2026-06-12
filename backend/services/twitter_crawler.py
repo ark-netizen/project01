@@ -24,19 +24,22 @@ _browser: Optional["Browser"] = None
 _context: Optional["BrowserContext"] = None
 _lock = asyncio.Lock()
 _needs_relogin = False
+_init_error: str = ""
 _cache: dict = {}
 CACHE_TTL = 300  # 5분
 
 
 async def initialize() -> None:
-    global _pw, _browser, _context, _needs_relogin
+    global _pw, _browser, _context, _needs_relogin, _init_error
 
     if not _PLAYWRIGHT_OK:
+        _init_error = "playwright_not_installed"
         return
 
     cookies_raw = os.getenv("TWITTER_COOKIES", "").strip()
     if not cookies_raw:
         _needs_relogin = True
+        _init_error = "no_cookies_env"
         return
 
     try:
@@ -45,8 +48,9 @@ async def initialize() -> None:
         except Exception:
             data = cookies_raw
         cookies = json.loads(data)
-    except Exception:
+    except Exception as e:
         _needs_relogin = True
+        _init_error = f"cookie_parse_error: {type(e).__name__}"
         return
 
     try:
@@ -70,9 +74,11 @@ async def initialize() -> None:
             locale="ko-KR",
         )
         await _context.add_cookies(cookies)
+        _init_error = "ok"
 
-    except Exception:
+    except Exception as e:
         _needs_relogin = True
+        _init_error = f"browser_launch_error: {type(e).__name__}: {str(e)[:120]}"
 
 
 def is_ready() -> bool:
