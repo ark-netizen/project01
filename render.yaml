@@ -3,8 +3,8 @@ services:
     name: project01-backend
     env: python
     rootDir: backend
-    buildCommand: pip install -r requirements.txt && playwright install chromium --with-deps
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    buildCommand: pip install -r requirements.txt && PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.browsers playwright install chromium
+    startCommand: PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.browsers uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: TWITTER_COOKIES
         sync: false
