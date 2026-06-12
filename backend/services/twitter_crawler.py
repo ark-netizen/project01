@@ -139,10 +139,10 @@ async def _do_search(keyword: str, count: int) -> list[dict]:
         encoded = urllib.parse.quote(keyword)
         await page.goto(
             f"https://x.com/search?q={encoded}&src=typed_query&f=live",
-            wait_until="networkidle",
-            timeout=25000,
+            wait_until="domcontentloaded",
+            timeout=40000,
         )
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(4)
 
         if "/login" in page.url or "/i/flow" in page.url:
             _needs_relogin = True
