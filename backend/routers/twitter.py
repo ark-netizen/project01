@@ -1,6 +1,6 @@
 import time
 from fastapi import APIRouter, HTTPException, Query
-from services.twitter_crawler import is_ready, search_tweets
+from services.twitter_crawler import is_ready, search_tweets, relogin_required
 from services.sentiment import analyze_batch, summarize
 from services.keywords import extract_keywords
 
@@ -12,7 +12,8 @@ COOLDOWN = 10  # 초
 
 @router.get("/status")
 def twitter_status():
-    return {"ready": is_ready()}
+    from services.twitter_crawler import relogin_required
+    return {"ready": is_ready(), "needs_relogin": relogin_required()}
 
 
 @router.get("/search")

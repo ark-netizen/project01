@@ -2,19 +2,17 @@ fastapi
 uvicorn[standard]
 python-dotenv
 
-# YouTube 댓글 크롤링 (API키 불필요)
+# YouTube 크롤링
 youtube-comment-downloader
-# YouTube 키워드 영상 검색 (API키 불필요)
 youtube-search-python
 
 # HTTP 요청
 requests<3
-# Chrome TLS/HTTP2 핑거프린트 모방 (Twitter/X 크롤링용)
-curl_cffi>=0.6.2
-# x-client-transaction-id 생성 알고리즘 (SearchTimeline 인증)
-twikit>=2.0.0
 
 # YouTube 날짜 파싱
 dateparser
 
 pydantic
+
+# Twitter/X 크롤링 (Playwright 헤드리스 브라우저)
+playwright>=1.40.0

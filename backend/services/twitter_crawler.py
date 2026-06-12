@@ -1,56 +1,200 @@
 import os
+import json
 import base64
+import hashlib
 import asyncio
+import time
+import urllib.parse
+from typing import Optional
 
-import twikit
+try:
+    from playwright.async_api import async_playwright, BrowserContext, Playwright, Browser
+    _PLAYWRIGHT_OK = True
+except ImportError:
+    _PLAYWRIGHT_OK = False
 
-_client: twikit.Client | None = None
-_COOKIES_PATH = "/tmp/tw_cookies.json"
+_pw: Optional["Playwright"] = None
+_browser: Optional["Browser"] = None
+_context: Optional["BrowserContext"] = None
+_lock = asyncio.Lock()
+_needs_relogin = False
+_cache: dict = {}
+CACHE_TTL = 300  # 5분
 
 
 async def initialize() -> None:
-    global _client
-    raw = os.getenv("TWITTER_COOKIES", "").strip()
-    if not raw:
+    global _pw, _browser, _context, _needs_relogin
+
+    if not _PLAYWRIGHT_OK:
         return
+
+    cookies_raw = os.getenv("TWITTER_COOKIES", "").strip()
+    if not cookies_raw:
+        _needs_relogin = True
+        return
+
     try:
         try:
-            data = base64.b64decode(raw).decode()
+            data = base64.b64decode(cookies_raw).decode()
         except Exception:
-            data = raw
-        with open(_COOKIES_PATH, "w", encoding="utf-8") as f:
-            f.write(data)
-        client = twikit.Client("ko-KR")
-        client.load_cookies(_COOKIES_PATH)
-        _client = client
+            data = cookies_raw
+        cookies = json.loads(data)
     except Exception:
-        _client = None
+        _needs_relogin = True
+        return
+
+    try:
+        _pw = await async_playwright().start()
+        _browser = await _pw.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+        )
+        _context = await _browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 720},
+            locale="ko-KR",
+        )
+        await _context.add_cookies(cookies)
+
+        if not await _verify_session():
+            _needs_relogin = True
+
+    except Exception:
+        _needs_relogin = True
+
+
+async def _verify_session() -> bool:
+    page = await _context.new_page()
+    try:
+        await page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=20000)
+        return "/login" not in page.url and "/i/flow" not in page.url
+    except Exception:
+        return False
+    finally:
+        await page.close()
 
 
 def is_ready() -> bool:
-    return _client is not None
+    return _context is not None and not _needs_relogin
+
+
+def relogin_required() -> bool:
+    return _needs_relogin
 
 
 async def search_tweets(keyword: str, count: int = 30) -> list[dict]:
+    global _needs_relogin
+
+    if _needs_relogin:
+        raise RuntimeError("Twitter 세션 만료: 쿠키를 갱신해주세요.")
     if not is_ready():
-        raise RuntimeError("Twitter 쿠키가 설정되지 않았습니다.")
+        raise RuntimeError("Twitter 서비스가 초기화되지 않았습니다.")
+
     count = min(count, 50)
+
+    cache_key = hashlib.md5(f"{keyword}:{count}".encode()).hexdigest()
+    cached = _cache.get(cache_key)
+    if cached and time.time() - cached[0] < CACHE_TTL:
+        return cached[1]
+
+    async with _lock:
+        cached = _cache.get(cache_key)
+        if cached and time.time() - cached[0] < CACHE_TTL:
+            return cached[1]
+
+        tweets = await _do_search(keyword, count)
+        _cache[cache_key] = (time.time(), tweets)
+        return tweets
+
+
+async def _do_search(keyword: str, count: int) -> list[dict]:
+    global _needs_relogin
+
+    page = await _context.new_page()
+    captured: list[dict] = []
+
+    async def on_response(response):
+        if "SearchTimeline" not in response.url:
+            return
+        try:
+            data = await response.json()
+            parsed = _parse_graphql(data)
+            if parsed:
+                captured.extend(parsed)
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+
     try:
-        results = await _client.search_tweet(keyword, "Latest", count=count)
-    except Exception as e:
-        msg = str(e).lower()
-        if any(k in msg for k in ("unauthorized", "401", "login", "cookie", "session")):
-            raise RuntimeError("Twitter 쿠키가 만료됐습니다. 로컬에서 재로그인 후 쿠키를 갱신해주세요.")
-        raise RuntimeError(f"Twitter 검색 오류: {str(e)[:120]}")
+        encoded = urllib.parse.quote(keyword)
+        await page.goto(
+            f"https://x.com/search?q={encoded}&src=typed_query&f=live",
+            wait_until="networkidle",
+            timeout=25000,
+        )
+        await asyncio.sleep(1.5)
+
+        if "/login" in page.url or "/i/flow" in page.url:
+            _needs_relogin = True
+            raise RuntimeError("Twitter 세션 만료: 쿠키를 갱신해주세요.")
+
+        return captured[:count]
+
+    finally:
+        await page.close()
+
+
+def _parse_graphql(data: dict) -> list[dict]:
+    try:
+        instructions = (
+            data["data"]["search_by_raw_query"]
+               ["search_timeline"]["timeline"]["instructions"]
+        )
+    except (KeyError, TypeError):
+        return []
 
     tweets = []
-    for t in results:
-        tweets.append({
-            "id": str(t.id),
-            "text": t.text or "",
-            "user": t.user.screen_name if t.user else "unknown",
-            "created_at": str(t.created_at or ""),
-            "likes": t.favorite_count or 0,
-            "retweets": t.retweet_count or 0,
-        })
+    for inst in instructions:
+        t = inst.get("type", "")
+        if t == "TimelineAddEntries":
+            entries = inst.get("entries", [])
+        elif t == "TimelineAddToModule":
+            entries = inst.get("moduleItems", [])
+        else:
+            continue
+        for entry in entries:
+            content = entry.get("content") or entry.get("item") or {}
+            ic = content.get("itemContent", {})
+            if ic.get("itemType") != "TimelineTweet":
+                continue
+            result = ic.get("tweet_results", {}).get("result", {})
+            if not result:
+                continue
+            if result.get("__typename") == "TweetWithVisibilityResults":
+                result = result.get("tweet", result)
+            leg = result.get("legacy", {})
+            uleg = (result.get("core", {})
+                         .get("user_results", {})
+                         .get("result", {})
+                         .get("legacy", {}))
+            if not leg:
+                continue
+            tweets.append({
+                "id": leg.get("id_str", ""),
+                "text": leg.get("full_text") or leg.get("text", ""),
+                "user": uleg.get("screen_name", "unknown"),
+                "created_at": leg.get("created_at", ""),
+                "likes": leg.get("favorite_count", 0),
+                "retweets": leg.get("retweet_count", 0),
+            })
     return tweets
