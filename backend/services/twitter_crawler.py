@@ -131,6 +131,7 @@ async def _do_search(keyword: str, count: int) -> list[dict]:
 
     page = await _context.new_page()
     captured: list[dict] = []
+    got_response = asyncio.Event()
 
     async def on_response(response):
         if "SearchTimeline" not in response.url:
@@ -140,8 +141,9 @@ async def _do_search(keyword: str, count: int) -> list[dict]:
             parsed = _parse_graphql(data)
             if parsed:
                 captured.extend(parsed)
+            got_response.set()
         except Exception:
-            pass
+            got_response.set()
 
     if _STEALTH_OK:
         await stealth_async(page)
@@ -154,11 +156,16 @@ async def _do_search(keyword: str, count: int) -> list[dict]:
             wait_until="domcontentloaded",
             timeout=40000,
         )
-        await asyncio.sleep(4)
 
         if "/login" in page.url or "/i/flow" in page.url:
             _needs_relogin = True
             raise RuntimeError("Twitter 세션 만료: 쿠키를 갱신해주세요.")
+
+        # SearchTimeline 응답이 올 때까지 대기 (최대 15초)
+        try:
+            await asyncio.wait_for(got_response.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            pass
 
         return captured[:count]
 
