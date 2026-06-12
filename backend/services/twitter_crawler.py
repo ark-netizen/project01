@@ -62,6 +62,18 @@ async def initialize() -> None:
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
+                "--single-process",
+                "--no-zygote",
+                "--disable-extensions",
+                "--disable-default-apps",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--disable-translate",
+                "--disable-features=TranslateUI,BlinkGenPropertyTrees",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                "--mute-audio",
+                "--hide-scrollbars",
             ],
         )
         _context = await _browser.new_context(
